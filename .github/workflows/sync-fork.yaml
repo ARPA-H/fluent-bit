@@ -25,6 +25,5 @@ jobs:
           UPSTREAM_REPO: fluent/fluent-bit
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          git checkout master
           gh repo sync ${UPSTREAM_REPO} --branch master
           git push origin master
