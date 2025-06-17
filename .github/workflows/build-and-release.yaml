@@ -1,7 +1,9 @@
 name: Build and release
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
 
 jobs:
   build-and-release:
@@ -40,4 +42,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/fluent-bit-*-apple*
-          tag_name: v4.0.3
