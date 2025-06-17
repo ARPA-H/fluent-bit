@@ -24,6 +24,8 @@ jobs:
 
       - name: Fetch and sync upstream changes
         run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/fluent/fluent-bit.git
           git fetch upstream
           git merge upstream/master
