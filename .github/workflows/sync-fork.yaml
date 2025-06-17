@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          
 
       - name: Fetch and sync upstream changes
         run: |
