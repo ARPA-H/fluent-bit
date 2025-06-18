@@ -76,10 +76,12 @@ jobs:
           if [ -z "$LATEST_LOCAL_TAG" ] && [ -n "$LATEST_UPSTREAM_TAG" ]; then
             echo "No local tags found, but upstream has tags. Build required."
             BUILD_REQUIRED="true"
+            git push origin "$LATEST_UPSTREAM_TAG"
           # Scenario 2: Latest upstream tag is different from latest local tag
           elif [ "$LATEST_UPSTREAM_TAG" != "$LATEST_LOCAL_TAG" ]; then
             echo "Upstream has a new latest tag: $LATEST_UPSTREAM_TAG. Build required."
             BUILD_REQUIRED="true"
+            git push origin "$LATEST_UPSTREAM_TAG"
           # Scenario 3: Latest tags have the same name, but point to different commits (tag moved/recreated)
           elif [ "$LATEST_UPSTREAM_TAG" = "$LATEST_LOCAL_TAG" ] && [ "$LATEST_UPSTREAM_TAG_SHA" != "$LATEST_LOCAL_TAG_SHA" ]; then
             echo "Latest tag '$LATEST_UPSTREAM_TAG' has been modified (SHA changed). Build required."
