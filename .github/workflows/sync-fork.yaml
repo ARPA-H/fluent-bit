@@ -9,6 +9,10 @@ jobs:
   sync:
     runs-on: ubuntu-latest
 
+    outputs:
+      latest_tag: ${{ steps.fetch-latest-tag.outputs.latest_tag }}
+      changes_detected: ${{ steps.fetch-latest-tag.outputs.changes_detected }}
+
     steps:
       - uses: actions/create-github-app-token@v1
         id: app-token
@@ -40,13 +44,13 @@ jobs:
           git checkout $latest_tag
 
           # Check if the latest tag has changes since last sync
-          changes_detected=$(git diff HEAD upstream/master --quiet || echo "true")
-          echo "new_tag_detected=$changes_detected" >> $GITHUB_OUTPUT
+          changes_detected=$(git diff "upstream/$latest_tag" --quiet || echo "true")
+          echo "changes_detected=$changes_detected" >> $GITHUB_OUTPUT
           git push origin tag $latest_tag
 
   build-and-relase:
     runs-on: macos-14
-    if: needs.sync.outputs.new_tag_detected == 'true'
+    if: needs.sync.outputs.changes_detected == 'true'
     needs: sync
     steps:
       - uses: actions/create-github-app-token@v1
