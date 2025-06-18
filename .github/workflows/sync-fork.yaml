@@ -44,7 +44,7 @@ jobs:
           git checkout $latest_tag
 
           # Check if the latest tag has changes since last sync
-          changes_detected=$(git diff "upstream/$latest_tag" --quiet || echo "true")
+          changes_detected=$(git diff "$latest_tag" --quiet || echo "true")
           echo "changes_detected=$changes_detected" >> $GITHUB_OUTPUT
           git push origin tag $latest_tag
 
