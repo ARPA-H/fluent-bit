@@ -38,7 +38,7 @@ jobs:
       - name: Get Latest Local Tag and Upstream Tag SHAs
         id: get_tags
         run: |
-          git fetch upstream --tags
+
           # Get the latest local tag (if any)
           LATEST_LOCAL_TAG=$(git tag --sort=-v:refname | head -n 1)
           LATEST_LOCAL_TAG_SHA=""
@@ -48,7 +48,8 @@ jobs:
           echo "Latest Local Tag: $LATEST_LOCAL_TAG (SHA: $LATEST_LOCAL_TAG_SHA)"
           echo "latest_local_tag=$LATEST_LOCAL_TAG" >> "$GITHUB_OUTPUT"
           echo "latest_local_tag_sha=$LATEST_LOCAL_TAG_SHA" >> "$GITHUB_OUTPUT"
-
+          
+          git fetch upstream --tags
           # Get the latest upstream tag (after fetching, it's now local)
           # We again sort by version. This will give you the latest tag from the *combined* set
           # of local tags and fetched upstream tags. If a new upstream tag is newer, it will be found.
