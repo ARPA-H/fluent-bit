@@ -1,4 +1,4 @@
-name: Sync master with upstream
+name: Sync master with upstream + build + release
 
 on:
   schedule:
@@ -30,6 +30,56 @@ jobs:
           git fetch --tags upstream
           git merge upstream/master
           git push origin master
-          latestTag=$(git describe --tags "$(git rev-list --tags --max-count=1)")
-          git checkout $latestTag
+        
+      - name: Get latest tag and check changes
+        id: fetch-latest-tag
+        run: |
+          # Fetch the latest tag name
+          latest_tag=$(git describe --tags "$(git rev-list --tags --max-count=1)")
+          echo "latest_tag=$latest_tag" >> $GITHUB_OUTPUT
+          git checkout $latest_tag
+
+          # Check if the latest tag has changes since last sync
+          changes_detected=$(git diff HEAD upstream/master --quiet || echo "true")
+          echo "new_tag_detected=$changes_detected" >> $GITHUB_OUTPUT
           git push origin tag $latestTag
+
+  build-and-relase:
+    runs-on: macos-14
+    if: needs.sync.outputs.new_tag_detected == 'true'
+    needs: sync
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ needs.sync.outputs.latest_tag }}
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install bison flex libyaml openssl pkgconfig || true
+
+      - name: Install cmake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
+      - name: Build Fluent Bit packages
+        run: |
+          export LIBRARY_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$LIBRARY_PATH
+          cmake -DCPACK_GENERATOR=productbuild -DFLB_NIGHTLY_BUILD=false ../ -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
+          cmake --build .
+          cpack -G productbuild
+        working-directory: build
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/fluent-bit-*-apple*
+          tag_name: ${{ needs.sync.outputs.latest_tag }}
