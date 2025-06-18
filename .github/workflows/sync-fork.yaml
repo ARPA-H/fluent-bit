@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      latest_tag: ${{ steps.fetch-latest-tag.outputs.latest_tag }}
-      changes_detected: ${{ steps.fetch-latest-tag.outputs.changes_detected }}
+      latest_tag: ${{ steps.get_tags.outputs.latest_upstream_tag }}
+      should_build: ${{ steps.compare.outputs.build_required }}
 
     steps:
       - uses: actions/create-github-app-token@v1
@@ -31,26 +31,66 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/fluent/fluent-bit.git
-          git fetch --tags upstream
           git merge upstream/master
           git push origin master
         
-      - name: Get latest tag and check changes
-        id: fetch-latest-tag
+      - name: Get Latest Local Tag and Upstream Tag SHAs
+        id: get_tags
         run: |
-          # Fetch the latest tag name
-          latest_tag=$(git describe --tags "$(git rev-list --tags --max-count=1)")
-          echo "latest_tag=$latest_tag" >> $GITHUB_OUTPUT
-          git checkout $latest_tag
+          git fetch upstream --tags
+          # Get the latest local tag (if any)
+          LATEST_LOCAL_TAG=$(git tag --sort=-v:refname | head -n 1)
+          LATEST_LOCAL_TAG_SHA=""
+          if [ -n "$LATEST_LOCAL_TAG" ]; then
+            LATEST_LOCAL_TAG_SHA=$(git rev-parse $LATEST_LOCAL_TAG)
+          fi
+          echo "Latest Local Tag: $LATEST_LOCAL_TAG (SHA: $LATEST_LOCAL_TAG_SHA)"
+          echo "latest_local_tag=$LATEST_LOCAL_TAG" >> "$GITHUB_OUTPUT"
+          echo "latest_local_tag_sha=$LATEST_LOCAL_TAG_SHA" >> "$GITHUB_OUTPUT"
 
-          # Check if the latest tag has changes since last sync
-          changes_detected=$(git diff "$latest_tag" --quiet || echo "true")
-          echo "changes_detected=$changes_detected" >> $GITHUB_OUTPUT
-          git push origin tag $latest_tag
+          # Get the latest upstream tag (after fetching, it's now local)
+          # We again sort by version. This will give you the latest tag from the *combined* set
+          # of local tags and fetched upstream tags. If a new upstream tag is newer, it will be found.
+          LATEST_UPSTREAM_TAG=$(git tag --sort=-v:refname | head -n 1)
+          LATEST_UPSTREAM_TAG_SHA=$(git rev-parse $LATEST_UPSTREAM_TAG)
+          echo "Latest Upstream Tag (after fetch): $LATEST_UPSTREAM_TAG (SHA: $LATEST_UPSTREAM_TAG_SHA)"
+          echo "latest_upstream_tag=$LATEST_UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "latest_upstream_tag_sha=$LATEST_UPSTREAM_TAG_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Compare Tags
+        id: compare
+        run: |
+          BUILD_REQUIRED="false"
+          LATEST_LOCAL_TAG="${{ steps.get_tags.outputs.latest_local_tag }}"
+          LATEST_LOCAL_TAG_SHA="${{ steps.get_tags.outputs.latest_local_tag_sha }}"
+          LATEST_UPSTREAM_TAG="${{ steps.get_tags.outputs.latest_upstream_tag }}"
+          LATEST_UPSTREAM_TAG_SHA="${{ steps.get_tags.outputs.latest_upstream_tag_sha }}"
+
+          echo "Comparing..."
+          echo "Local Tag: $LATEST_LOCAL_TAG (SHA: $LATEST_LOCAL_TAG_SHA)"
+          echo "Upstream Tag: $LATEST_UPSTREAM_TAG (SHA: $LATEST_UPSTREAM_TAG_SHA)"
+
+          # Scenario 1: No local tags, but upstream has tags
+          if [ -z "$LATEST_LOCAL_TAG" ] && [ -n "$LATEST_UPSTREAM_TAG" ]; then
+            echo "No local tags found, but upstream has tags. Build required."
+            BUILD_REQUIRED="true"
+          # Scenario 2: Latest upstream tag is different from latest local tag
+          elif [ "$LATEST_UPSTREAM_TAG" != "$LATEST_LOCAL_TAG" ]; then
+            echo "Upstream has a new latest tag: $LATEST_UPSTREAM_TAG. Build required."
+            BUILD_REQUIRED="true"
+          # Scenario 3: Latest tags have the same name, but point to different commits (tag moved/recreated)
+          elif [ "$LATEST_UPSTREAM_TAG" = "$LATEST_LOCAL_TAG" ] && [ "$LATEST_UPSTREAM_TAG_SHA" != "$LATEST_LOCAL_TAG_SHA" ]; then
+            echo "Latest tag '$LATEST_UPSTREAM_TAG' has been modified (SHA changed). Build required."
+            BUILD_REQUIRED="true"
+          else
+            echo "No new tags or changes to the latest tag. No build required."
+          fi
+
+          echo "build_required=$BUILD_REQUIRED" >> "$GITHUB_OUTPUT"
 
   build-and-relase:
     runs-on: macos-14
-    if: needs.sync.outputs.changes_detected == 'true'
+    if: needs.sync.outputs.should_build == 'true'
     needs: sync
     steps:
       - uses: actions/create-github-app-token@v1
