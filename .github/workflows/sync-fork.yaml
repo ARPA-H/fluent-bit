@@ -26,14 +26,14 @@ jobs:
           fetch-depth: 0
           
 
-      - name: Fetch and sync upstream changes
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/fluent/fluent-bit.git
-          git fetch upstream
-          git merge upstream/master
-          git push origin master
+      # - name: Fetch and sync upstream changes
+      #   run: |
+      #     git config --global user.name "github-actions[bot]"
+      #     git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      #     git remote add upstream https://github.com/fluent/fluent-bit.git
+      #     git fetch upstream
+      #     git merge upstream/master
+      #     git push origin master
         
       - name: Get Latest Local Tag and Upstream Tag SHAs
         id: get_tags
@@ -48,7 +48,7 @@ jobs:
           echo "Latest Local Tag: $LATEST_LOCAL_TAG (SHA: $LATEST_LOCAL_TAG_SHA)"
           echo "latest_local_tag=$LATEST_LOCAL_TAG" >> "$GITHUB_OUTPUT"
           echo "latest_local_tag_sha=$LATEST_LOCAL_TAG_SHA" >> "$GITHUB_OUTPUT"
-          
+
           git fetch upstream --tags
           # Get the latest upstream tag (after fetching, it's now local)
           # We again sort by version. This will give you the latest tag from the *combined* set
