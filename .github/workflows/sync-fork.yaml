@@ -42,7 +42,7 @@ jobs:
           # Check if the latest tag has changes since last sync
           changes_detected=$(git diff HEAD upstream/master --quiet || echo "true")
           echo "new_tag_detected=$changes_detected" >> $GITHUB_OUTPUT
-          git push origin tag $latestTag
+          git push origin tag $latest_tag
 
   build-and-relase:
     runs-on: macos-14
