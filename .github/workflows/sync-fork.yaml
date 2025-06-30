@@ -123,7 +123,28 @@ jobs:
           export LIBRARY_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$LIBRARY_PATH
           cmake -DCPACK_GENERATOR=productbuild -DFLB_NIGHTLY_BUILD=false ../ -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
           cmake --build .
-          cpack -G productbuild
+        working-directory: build
+
+      - name: Bundle libyaml.dylib and fix install name
+        run: |
+          # Find and copy libyaml.dylib
+          YAML_PATH=$(brew --prefix libyaml)/lib/libyaml.dylib
+          mkdir -p build/Frameworks
+          cp "$YAML_PATH" build/Frameworks/
+
+          # Determine your built binary's name – update if different!
+          BIN=build/fluent-bit
+
+          # Patch the binary so it loads the bundled libyaml
+          install_name_tool -change "$YAML_PATH" "@executable_path/../Frameworks/libyaml.dylib" "$BIN"
+
+          # Optionally codesign
+          codesign --sign - build/Frameworks/libyaml.dylib
+
+        shell: bash
+
+      - name: Build pkg with cpack
+        run: cpack -G productbuild
         working-directory: build
 
       - name: Create release
