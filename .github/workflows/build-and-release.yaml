@@ -39,25 +39,28 @@ jobs:
         working-directory: build
 
       - name: List built files for troubleshooting
-        run: ls -lhR build
+        run: ls -lh build/bin
 
       - name: Bundle libyaml.dylib and fix install name
         run: |
-          # Find and copy libyaml.dylib
+          # Find libyaml from Homebrew 
           YAML_PATH=$(brew --prefix libyaml)/lib/libyaml.dylib
           mkdir -p build/Frameworks
           cp "$YAML_PATH" build/Frameworks/
 
-          # Determine your built binary's name – update if different!
-          BIN=build/fluent-bit
+          # Path to the actual binary inside bin/
+          BIN=build/bin/fluent-bit
 
-          # Patch the binary so it loads the bundled libyaml
+          if [ ! -f "$BIN" ]; then
+            echo "Binary not found at $BIN! Aborting."
+            ls -lh build/bin
+            exit 1
+          fi
+
+          # Patch it to use the Frameworks directory
           install_name_tool -change "$YAML_PATH" "@executable_path/../Frameworks/libyaml.dylib" "$BIN"
-
-          # Optionally codesign
           codesign --sign - build/Frameworks/libyaml.dylib
 
-        shell: bash
 
       - name: Build pkg with cpack
         run: cpack -G productbuild
