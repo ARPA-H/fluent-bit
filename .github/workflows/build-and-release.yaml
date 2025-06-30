@@ -59,7 +59,7 @@ jobs:
 
           # Patch it to use the Frameworks directory
           install_name_tool -change "$YAML_PATH" "@executable_path/../Frameworks/libyaml.dylib" "$BIN"
-          codesign --sign - build/Frameworks/libyaml.dylib
+          codesign --sign - build/Frameworks/libyaml.dylib || true
 
 
       - name: Build pkg with cpack
