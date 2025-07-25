@@ -48,6 +48,12 @@ jobs:
           mkdir -p build/Frameworks
           cp "$YAML_PATH" build/Frameworks/
 
+          echo "Current working directory: $(pwd)"
+          echo "Listing of build directory:"
+          ls -al build/
+          echo "Listing of root directory:"
+          ls -al
+
           # Path to the actual binary inside bin/
           BIN=build/bin/fluent-bit
 
