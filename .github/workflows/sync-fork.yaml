@@ -127,6 +127,12 @@ jobs:
 
       - name: Bundle libyaml.dylib and fix install name
         run: |
+          echo "Current working directory: $(pwd)"
+          echo "Listing of build directory:"
+          ls -al build/
+          echo "Listing of root directory:"
+          ls -al
+
           # Find and copy libyaml.dylib
           YAML_PATH=$(brew --prefix libyaml)/lib/libyaml.dylib
           mkdir -p build/Frameworks
