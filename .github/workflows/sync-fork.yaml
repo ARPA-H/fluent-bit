@@ -133,6 +133,9 @@ jobs:
           echo "Listing of root directory:"
           ls -al
 
+          echo "Searching for fluent-bit binary under build/:"
+          find build/ -type f -name 'fluent-bit'
+
           # Find and copy libyaml.dylib
           YAML_PATH=$(brew --prefix libyaml)/lib/libyaml.dylib
           mkdir -p build/Frameworks
