@@ -142,7 +142,7 @@ jobs:
           cp "$YAML_PATH" build/Frameworks/
 
           # Determine your built binary's name – update if different!
-          BIN=build/fluent-bit
+          BIN=build//bin/fluent-bit
 
           # Patch the binary so it loads the bundled libyaml
           install_name_tool -change "$YAML_PATH" "@executable_path/../Frameworks/libyaml.dylib" "$BIN"
