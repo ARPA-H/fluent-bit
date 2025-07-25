@@ -148,7 +148,7 @@ jobs:
           install_name_tool -change "$YAML_PATH" "@executable_path/../Frameworks/libyaml.dylib" "$BIN"
 
           # Optionally codesign
-          codesign --sign - build/Frameworks/libyaml.dylib
+          # codesign --sign - build/Frameworks/libyaml.dylib
 
         shell: bash
 
