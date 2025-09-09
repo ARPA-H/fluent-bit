@@ -125,31 +125,61 @@ jobs:
           cmake --build .
         working-directory: build
 
-      - name: Bundle libyaml.dylib and fix install name
+      - name: Bundle libyaml and fix install name
         run: |
           echo "Current working directory: $(pwd)"
-          echo "Listing of build directory:"
-          ls -al build/
-          echo "Listing of root directory:"
-          ls -al
-
-          echo "Searching for fluent-bit binary under build/:"
-          find build/ -type f -name 'fluent-bit'
-
-          # Find and copy libyaml.dylib
-          YAML_PATH=$(brew --prefix libyaml)/lib/libyaml.dylib
-          mkdir -p build/Frameworks
-          cp "$YAML_PATH" build/Frameworks/
-
-          # Determine your built binary's name – update if different!
-          BIN=build//bin/fluent-bit
-
-          # Patch the binary so it loads the bundled libyaml
-          install_name_tool -change "$YAML_PATH" "@executable_path/../Frameworks/libyaml.dylib" "$BIN"
-
+          
+          # Find the fluent-bit binary
+          FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
+          echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
+          
+          # Check what libraries the binary depends on
+          echo "Dependencies before patching:"
+          otool -L "$FLUENT_BIT_BIN" | grep yaml
+          
+          # Find the exact libyaml path being referenced
+          YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep libyaml | awk '{print $1}')
+          echo "Binary references yaml library: $YAML_REF"
+          
+          # Get the actual file path from the brew installation
+          YAML_DIR=$(brew --prefix libyaml)/lib
+          echo "libyaml library directory: $YAML_DIR"
+          echo "libyaml files available:"
+          ls -la "$YAML_DIR"
+          
+          # Find the dylib file that corresponds to the reference
+          YAML_FILE=$(basename "$YAML_REF")
+          YAML_PATH="$YAML_DIR/$YAML_FILE"
+          if [ ! -f "$YAML_PATH" ]; then
+            # Look for the symlink target if the exact file doesn't exist
+            for file in "$YAML_DIR"/libyaml*.dylib; do
+              if [[ -L "$file" && "$(readlink "$file")" == "$YAML_FILE" ]]; then
+                YAML_PATH="$file"
+                break
+              fi
+            done
+          fi
+          
+          echo "Using yaml library: $YAML_PATH"
+          
+          # Create Frameworks directory in the same location as the binary
+          BINARY_DIR=$(dirname "$FLUENT_BIT_BIN")
+          FRAMEWORKS_DIR="$BINARY_DIR/../Frameworks"
+          mkdir -p "$FRAMEWORKS_DIR"
+          
+          # Copy the library to Frameworks directory
+          cp "$YAML_PATH" "$FRAMEWORKS_DIR/$YAML_FILE"
+          echo "Copied $YAML_PATH to $FRAMEWORKS_DIR/$YAML_FILE"
+          
+          # Change the install name in the binary
+          install_name_tool -change "$YAML_REF" "@executable_path/../Frameworks/$YAML_FILE" "$FLUENT_BIT_BIN"
+          
+          # Check if install_name_tool worked
+          echo "Dependencies after patching:"
+          otool -L "$FLUENT_BIT_BIN" | grep yaml
+          
           # Optionally codesign
-          # codesign --sign - build/Frameworks/libyaml.dylib
-
+          # codesign --sign - "$FRAMEWORKS_DIR/$YAML_FILE"
         shell: bash
 
       - name: Build pkg with cpack
