@@ -182,9 +182,62 @@ jobs:
           # codesign --sign - "$FRAMEWORKS_DIR/$YAML_FILE"
         shell: bash
 
+      - name: Update CMake install configuration for Frameworks directory
+        run: |
+          # Create a script to ensure the Frameworks directory is properly installed
+          cat > build/install_frameworks.cmake << EOF
+          # Install the Frameworks directory explicitly
+          file(GLOB FRAMEWORK_LIBS "\${CMAKE_BINARY_DIR}/../Frameworks/*.dylib")
+          if(FRAMEWORK_LIBS)
+            install(FILES \${FRAMEWORK_LIBS} 
+                   DESTINATION "\${CMAKE_INSTALL_PREFIX}/Frameworks"
+                   PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+            message(STATUS "Installing framework libraries: \${FRAMEWORK_LIBS}")
+          else()
+            message(WARNING "No framework libraries found for installation")
+          endif()
+          EOF
+          
+          # Add include of this file to the end of CPackConfig.cmake
+          echo "include(install_frameworks.cmake)" >> build/CPackConfig.cmake
+        shell: bash
+
       - name: Build pkg with cpack
         run: cpack -G productbuild
         working-directory: build
+
+      - name: Verify package contents before release
+        run: |
+          echo "Extracting package to verify contents"
+          PKG_FILE=$(ls build/fluent-bit-*-apple*)
+          echo "Package file: $PKG_FILE"
+          
+          # Create a temporary directory for extraction
+          TEMP_DIR=$(mktemp -d)
+          echo "Created temp dir: $TEMP_DIR"
+          
+          # Extract the package content (may require sudo)
+          pkgutil --expand "$PKG_FILE" "$TEMP_DIR/extracted_pkg"
+          
+          echo "Package structure:"
+          find "$TEMP_DIR/extracted_pkg" -type f | sort
+          
+          # Look for the Frameworks directory in the extracted content
+          echo "Searching for Frameworks directory in package:"
+          find "$TEMP_DIR/extracted_pkg" -name "Frameworks" -o -path "*/Frameworks/*" | sort
+          
+          # If Frameworks directory is missing, log an error
+          if ! find "$TEMP_DIR/extracted_pkg" -name "Frameworks" -o -path "*/Frameworks/*" | grep -q .; then
+            echo "ERROR: Frameworks directory is missing from the package!"
+            echo "::error::Frameworks directory not found in the package"
+            # We continue the workflow to see the release, but mark it as problematic
+          else
+            echo "Frameworks directory found in the package"
+          fi
+          
+          # Clean up
+          rm -rf "$TEMP_DIR"
+        shell: bash
 
       - name: Create release
         uses: softprops/action-gh-release@v2
