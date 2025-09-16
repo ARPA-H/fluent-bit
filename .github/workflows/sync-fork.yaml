@@ -125,131 +125,97 @@ jobs:
           cmake --build .
         working-directory: build
 
-      - name: Bundle libyaml and fix install name
+      - name: Create libyaml dependency package
         run: |
-          echo "Current working directory: $(pwd)"
+          echo "Creating separate libyaml dependency package..."
           
-          # Find the fluent-bit binary
+          # Find the fluent-bit binary to identify required dependencies
           FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
           echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
           
-          # Check what libraries the binary depends on
-          echo "Dependencies before patching:"
-          otool -L "$FLUENT_BIT_BIN" | grep yaml
+          # Check for yaml dependency
+          echo "Checking dependencies..."
+          DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep yaml)
+          echo "$DEPS"
           
           # Find the exact libyaml path being referenced
           YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep libyaml | awk '{print $1}')
+          if [ -z "$YAML_REF" ]; then
+            echo "No libyaml dependency found, skipping package creation"
+            exit 0
+          fi
           echo "Binary references yaml library: $YAML_REF"
           
           # Get the actual file path from the brew installation
           YAML_DIR=$(brew --prefix libyaml)/lib
           echo "libyaml library directory: $YAML_DIR"
-          echo "libyaml files available:"
-          ls -la "$YAML_DIR"
+          echo "Available yaml libraries:"
+          ls -la "$YAML_DIR" | grep yaml
           
           # Find the dylib file that corresponds to the reference
           YAML_FILE=$(basename "$YAML_REF")
           YAML_PATH="$YAML_DIR/$YAML_FILE"
           if [ ! -f "$YAML_PATH" ]; then
-            # Look for the symlink target if the exact file doesn't exist
-            for file in "$YAML_DIR"/libyaml*.dylib; do
-              if [[ -L "$file" && "$(readlink "$file")" == "$YAML_FILE" ]]; then
-                YAML_PATH="$file"
-                break
-              fi
-            done
+            # Try to find by pattern if exact file not found
+            YAML_PATH=$(find "$YAML_DIR" -name "libyaml*.dylib" | head -1)
+            if [ -z "$YAML_PATH" ]; then
+              echo "Error: Could not find libyaml library"
+              exit 1
+            fi
+            YAML_FILE=$(basename "$YAML_PATH")
           fi
-          
           echo "Using yaml library: $YAML_PATH"
           
-          # Create Frameworks directory in the same location as the binary
-          BINARY_DIR=$(dirname "$FLUENT_BIT_BIN")
-          FRAMEWORKS_DIR="$BINARY_DIR/../Frameworks"
-          mkdir -p "$FRAMEWORKS_DIR"
+          # Get version information from libyaml
+          LIBYAML_VERSION=$(brew info --json=v2 libyaml | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "0.2.5")
+          echo "libyaml version: $LIBYAML_VERSION"
           
-          # Copy the library to Frameworks directory
-          cp "$YAML_PATH" "$FRAMEWORKS_DIR/$YAML_FILE"
-          echo "Copied $YAML_PATH to $FRAMEWORKS_DIR/$YAML_FILE"
+          # Create a directory structure for the libyaml package
+          STAGING_DIR=$(mktemp -d)
+          INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
+          mkdir -p "$INSTALL_DIR"
           
-          # Change the install name in the binary
-          install_name_tool -change "$YAML_REF" "@executable_path/../Frameworks/$YAML_FILE" "$FLUENT_BIT_BIN"
+          # Copy the libyaml library to the staging directory
+          cp "$YAML_PATH" "$INSTALL_DIR/$YAML_FILE"
+          echo "Copied $YAML_PATH to $INSTALL_DIR/$YAML_FILE"
           
-          # Check if install_name_tool worked
-          echo "Dependencies after patching:"
-          otool -L "$FLUENT_BIT_BIN" | grep yaml
+          # Create a simple pkg using pkgbuild
+          LIBYAML_PKG="build/fluent-bit-libyaml-$LIBYAML_VERSION-apple.pkg"
+          pkgbuild --root "$STAGING_DIR" \
+                   --identifier "com.fluentbit.pkg.libyaml" \
+                   --version "$LIBYAML_VERSION" \
+                   --install-location "/" \
+                   "$LIBYAML_PKG"
           
-          # Create a CMake install component for Frameworks
-          # This ensures the Frameworks directory gets included in the package
-          mkdir -p build/packaging/components
-          cat > build/packaging/components/Frameworks.cmake << EOF
-          file(INSTALL DESTINATION "\${CMAKE_INSTALL_PREFIX}/Frameworks" TYPE FILE FILES "${FRAMEWORKS_DIR}/${YAML_FILE}")
-          EOF
+          echo "Created libyaml package: $LIBYAML_PKG"
           
-          # Optionally codesign
-          # codesign --sign - "$FRAMEWORKS_DIR/$YAML_FILE"
-        shell: bash
-
-      - name: Update CMake install configuration for Frameworks directory
-        run: |
-          # Create a CMakeLists.txt file in the build directory that includes the Frameworks component
-          echo "Adding Frameworks component to installation configuration"
+          # Clean up
+          rm -rf "$STAGING_DIR"
           
-          # Append to the main CMakeLists.txt or create a new file that gets included
-          cat >> build/CPackConfig.cmake << EOF
-          
-          # Add Frameworks directory to installation
-          install(DIRECTORY "${FRAMEWORKS_DIR}/"
-                  DESTINATION "\${CMAKE_INSTALL_PREFIX}/Frameworks"
-                  COMPONENT frameworks
-                  FILES_MATCHING PATTERN "*.dylib")
-          
-          # Make sure the frameworks component is included in the package
-          list(APPEND CPACK_COMPONENTS_ALL frameworks)
-          EOF
-          
-          # Show what we've added
-          echo "Added the following to CPackConfig.cmake:"
-          cat build/CPackConfig.cmake
+          # Optionally sign the package
+          # productsign --sign "Developer ID Installer: Your Name" "$LIBYAML_PKG" "$LIBYAML_PKG.signed"
+          # mv "$LIBYAML_PKG.signed" "$LIBYAML_PKG"
         shell: bash
 
       - name: Build pkg with cpack
         run: cpack -G productbuild
         working-directory: build
 
-      - name: Verify Frameworks directory inclusion
-        run: |
-          echo "Verifying the Frameworks directory in the package..."
-          
-          # Find the built package
-          PKG_FILE=$(find build/ -name "fluent-bit-*.pkg" | head -n 1)
-          echo "Found package: $PKG_FILE"
-          
-          # Create a temporary directory for extraction
-          TEMP_DIR=$(mktemp -d)
-          
-          # Extract the package contents
-          pkgutil --expand "$PKG_FILE" "$TEMP_DIR/extracted_pkg"
-          
-          # Check for the Frameworks directory in the extracted contents
-          echo "Looking for Frameworks directory in package..."
-          find "$TEMP_DIR/extracted_pkg" -type d -name "Frameworks" | while read dir; do
-            echo "Found Frameworks directory: $dir"
-            echo "Contents:"
-            ls -la "$dir"
-          done
-          
-          # Check for libyaml in any location in the package
-          echo "Looking for libyaml files in package..."
-          find "$TEMP_DIR/extracted_pkg" -name "*yaml*.dylib" | while read file; do
-            echo "Found libyaml file: $file"
-          done
-          
-          # Clean up
-          rm -rf "$TEMP_DIR"
-        shell: bash
-
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/fluent-bit-*-apple*
+          files: build/fluent-bit-*-apple*.pkg
           tag_name: ${{ needs.sync.outputs.latest_tag }}
+          body: |
+            ## Fluent Bit Release ${{ needs.sync.outputs.latest_tag }}
+            
+            This release includes two packages:
+            1. **fluent-bit-libyaml-*-apple.pkg** - Install this dependency package FIRST
+            2. **fluent-bit-*-apple.pkg** - Install this main Fluent Bit package SECOND
+            
+            ### Installation Instructions:
+            1. Download both .pkg files
+            2. Install the libyaml dependency: `sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /`
+            3. Install Fluent Bit: `sudo installer -pkg fluent-bit-*-apple.pkg -target /`
+            
+            The libyaml dependency will be installed to `/Library/Management/fluent-bit/Frameworks/` to ensure proper dependency resolution.
