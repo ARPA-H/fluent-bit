@@ -135,7 +135,7 @@ jobs:
           
           # Check what libraries the binary depends on
           echo "Dependencies before patching:"
-          otool -L "$FLUENT_BIT_BIN" | grep yaml
+          otool -L "$FLUENT_BIT_BIN" | grep dylib
           
           # # Find the exact libyaml path being referenced
           # YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep openssl | awk '{print $1}')
