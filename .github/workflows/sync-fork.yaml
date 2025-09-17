@@ -139,6 +139,7 @@ jobs:
           
           # # Find the exact libyaml path being referenced
           # YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep openssl | awk '{print $1}')
+          YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep libyaml | awk '{print $1}')
           # echo "Binary references yaml library: $YAML_REF"
           
           # # Get the actual file path from the brew installation
@@ -148,17 +149,17 @@ jobs:
           # ls -la "$YAML_DIR"
           
           # # Find the dylib file that corresponds to the reference
-          # YAML_FILE=$(basename "$YAML_REF")
-          # YAML_PATH="$YAML_DIR/$YAML_FILE"
-          # if [ ! -f "$YAML_PATH" ]; then
-          #   # Look for the symlink target if the exact file doesn't exist
-          #   for file in "$YAML_DIR"/libyaml*.dylib; do
-          #     if [[ -L "$file" && "$(readlink "$file")" == "$YAML_FILE" ]]; then
-          #       YAML_PATH="$file"
-          #       break
-          #     fi
-          #   done
-          # fi
+          YAML_FILE=$(basename "$YAML_REF")
+          YAML_PATH="$YAML_DIR/$YAML_FILE"
+          if [ ! -f "$YAML_PATH" ]; then
+            # Look for the symlink target if the exact file doesn't exist
+            for file in "$YAML_DIR"/libyaml*.dylib; do
+              if [[ -L "$file" && "$(readlink "$file")" == "$YAML_FILE" ]]; then
+                YAML_PATH="$file"
+                break
+              fi
+            done
+          fi
           
           # echo "Using yaml library: $YAML_PATH"
           
@@ -172,8 +173,9 @@ jobs:
           # echo "Copied $YAML_PATH to $FRAMEWORKS_DIR/$YAML_FILE"
           
           # Change the install name in the binary
-          # install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib" "@executable_path/../Frameworks/$YAML_FILE" "$FLUENT_BIT_BIN"
-          
+          install_name_tool -change "$YAML_REF" "@executable_path/../Frameworks/$YAML_FILE" "$FLUENT_BIT_BIN"
+          install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib" "@executable_path/../Frameworks/libssl.3.dylib" "$FLUENT_BIT_BIN"
+
           # # Check if install_name_tool worked
           # echo "Dependencies after patching:"
           # otool -L "$FLUENT_BIT_BIN" | grep yaml
