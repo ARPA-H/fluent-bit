@@ -175,7 +175,9 @@ jobs:
           # Change the install name in the binary
           install_name_tool -change "$YAML_REF" "@executable_path/../Frameworks/$YAML_FILE" "$FLUENT_BIT_BIN"
           install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib" "@executable_path/../Frameworks/libssl.3.dylib" "$FLUENT_BIT_BIN"
+          install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib" "@executable_path/../Frameworks/libcrypto.3.dylib" "$FLUENT_BIT_BIN"
 
+          
           # # Check if install_name_tool worked
           # echo "Dependencies after patching:"
           # otool -L "$FLUENT_BIT_BIN" | grep yaml
