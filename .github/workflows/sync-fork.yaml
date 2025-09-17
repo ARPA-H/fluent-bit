@@ -260,6 +260,88 @@ jobs:
           # productsign --sign "Developer ID Installer: Your Name" "$LIBYAML_PKG" "$LIBYAML_PKG.signed"
           # mv "$LIBYAML_PKG.signed" "$LIBYAML_PKG"
         shell: bash
+        
+      - name: Create OpenSSL dependency package
+        run: |
+          echo "Creating separate OpenSSL dependency package..."
+          
+          # Find the fluent-bit binary to identify required dependencies
+          FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
+          echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
+          
+          # Check for OpenSSL dependencies
+          echo "Checking for OpenSSL dependencies..."
+          OPENSSL_DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep -E 'libssl|libcrypto')
+          echo "$OPENSSL_DEPS"
+          
+          # If no OpenSSL dependencies, exit early
+          if [ -z "$OPENSSL_DEPS" ]; then
+            echo "No OpenSSL dependencies found, skipping package creation"
+            exit 0
+          fi
+          
+          # Get the OpenSSL brew installation path
+          OPENSSL_DIR=$(brew --prefix openssl)/lib
+          echo "OpenSSL library directory: $OPENSSL_DIR"
+          echo "Available OpenSSL libraries:"
+          ls -la "$OPENSSL_DIR" | grep -E 'libssl|libcrypto'
+          
+          # Get version information from OpenSSL
+          OPENSSL_VERSION=$(brew info --json=v2 openssl | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "3.0.0")
+          echo "OpenSSL version: $OPENSSL_VERSION"
+          
+          # Create a directory structure for the OpenSSL package
+          STAGING_DIR=$(mktemp -d)
+          INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
+          mkdir -p "$INSTALL_DIR"
+          
+          # Find and copy all OpenSSL libraries needed by the binary
+          for LIB_REF in $(otool -L "$FLUENT_BIT_BIN" | grep -E 'libssl|libcrypto' | awk '{print $1}'); do
+            LIB_FILE=$(basename "$LIB_REF")
+            LIB_PATH="$OPENSSL_DIR/$LIB_FILE"
+            
+            # If direct file not found, try to find it
+            if [ ! -f "$LIB_PATH" ]; then
+              # Try to match by pattern
+              PATTERN=$(echo "$LIB_FILE" | sed 's/\.[0-9]*\.[0-9]*$/.*/')
+              LIB_PATH=$(find "$OPENSSL_DIR" -name "$PATTERN" | head -1)
+              
+              if [ -z "$LIB_PATH" ]; then
+                echo "Warning: Could not find OpenSSL library $LIB_FILE"
+                continue
+              fi
+              LIB_FILE=$(basename "$LIB_PATH")
+            fi
+            
+            # Copy the library
+            echo "Copying $LIB_PATH to $INSTALL_DIR/$LIB_FILE"
+            cp "$LIB_PATH" "$INSTALL_DIR/$LIB_FILE"
+            
+            # If this is a symlink, follow and copy the actual library
+            if [[ -L "$LIB_PATH" ]]; then
+              REAL_LIB=$(readlink "$LIB_PATH")
+              if [[ "$REAL_LIB" != /* ]]; then
+                REAL_LIB="$OPENSSL_DIR/$REAL_LIB"
+              fi
+              REAL_LIB_FILE=$(basename "$REAL_LIB")
+              echo "Copying linked library $REAL_LIB to $INSTALL_DIR/$REAL_LIB_FILE"
+              cp "$REAL_LIB" "$INSTALL_DIR/$REAL_LIB_FILE"
+            fi
+          done
+          
+          # Create a simple pkg using pkgbuild
+          OPENSSL_PKG="build/fluent-bit-openssl-$OPENSSL_VERSION-apple.pkg"
+          pkgbuild --root "$STAGING_DIR" \
+                  --identifier "com.fluentbit.pkg.openssl" \
+                  --version "$OPENSSL_VERSION" \
+                  --install-location "/" \
+                  "$OPENSSL_PKG"
+          
+          echo "Created OpenSSL package: $OPENSSL_PKG"
+          
+          # Clean up
+          rm -rf "$STAGING_DIR"
+        shell: bash
 
       - name: Build pkg with cpack
         run: cpack -G productbuild
@@ -273,13 +355,15 @@ jobs:
           body: |
             ## Fluent Bit Release ${{ needs.sync.outputs.latest_tag }}
             
-            This release includes two packages:
+            This release includes three packages:
             1. **fluent-bit-libyaml-*-apple.pkg** - Install this dependency package FIRST
-            2. **fluent-bit-*-apple.pkg** - Install this main Fluent Bit package SECOND
+            2. **fluent-bit-openssl-*-apple.pkg** - Install this dependency package SECOND
+            3. **fluent-bit-*-apple.pkg** - Install the main Fluent Bit package LAST
             
             ### Installation Instructions:
-            1. Download both .pkg files
+            1. Download all .pkg files
             2. Install the libyaml dependency: `sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /`
-            3. Install Fluent Bit: `sudo installer -pkg fluent-bit-*-apple.pkg -target /`
+            3. Install the OpenSSL dependency: `sudo installer -pkg fluent-bit-openssl-*-apple.pkg -target /`
+            4. Install Fluent Bit: `sudo installer -pkg fluent-bit-*-apple.pkg -target /`
             
-            The libyaml dependency will be installed to `/Library/Management/fluent-bit/Frameworks/` to ensure proper dependency resolution.
+            All dependencies will be installed to `/Library/Management/fluent-bit/Frameworks/` to ensure proper dependency resolution.
