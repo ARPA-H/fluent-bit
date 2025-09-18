@@ -138,15 +138,8 @@ jobs:
           otool -L "$FLUENT_BIT_BIN" | grep dylib
           
           # # Find the exact libyaml path being referenced
-          # YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep openssl | awk '{print $1}')
           YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep libyaml | awk '{print $1}')
-          # echo "Binary references yaml library: $YAML_REF"
           
-          # # Get the actual file path from the brew installation
-          # YAML_DIR=$(brew --prefix libyaml)/lib
-          # echo "libyaml library directory: $YAML_DIR"
-          # echo "libyaml files available:"
-          # ls -la "$YAML_DIR"
           
           # # Find the dylib file that corresponds to the reference
           YAML_FILE=$(basename "$YAML_REF")
@@ -161,36 +154,16 @@ jobs:
             done
           fi
           
-          # echo "Using yaml library: $YAML_PATH"
-          
           # Create Frameworks directory in the same location as the binary
           BINARY_DIR=$(dirname "$FLUENT_BIT_BIN")
           FRAMEWORKS_DIR="$BINARY_DIR/../Frameworks"
           mkdir -p "$FRAMEWORKS_DIR"
-          
-          # Copy the library to Frameworks directory
-          # cp "$YAML_PATH" "$FRAMEWORKS_DIR/$YAML_FILE"
-          # echo "Copied $YAML_PATH to $FRAMEWORKS_DIR/$YAML_FILE"
           
           # Change the install name in the binary
           install_name_tool -change "$YAML_REF" "@executable_path/../Frameworks/$YAML_FILE" "$FLUENT_BIT_BIN"
           install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib" "@executable_path/../Frameworks/libssl.3.dylib" "$FLUENT_BIT_BIN"
           install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib" "@executable_path/../Frameworks/libcrypto.3.dylib" "$FLUENT_BIT_BIN"
 
-          
-          # # Check if install_name_tool worked
-          # echo "Dependencies after patching:"
-          # otool -L "$FLUENT_BIT_BIN" | grep yaml
-          
-          # # Create a CMake install component for Frameworks
-          # # This ensures the Frameworks directory gets included in the package
-          # mkdir -p build/packaging/components
-          # cat > build/packaging/components/Frameworks.cmake << EOF
-          # file(INSTALL DESTINATION "\${CMAKE_INSTALL_PREFIX}/Frameworks" TYPE FILE FILES "${FRAMEWORKS_DIR}/${YAML_FILE}")
-          # EOF
-          
-          # Optionally codesign
-          # codesign --sign - "$FRAMEWORKS_DIR/$YAML_FILE"
         shell: bash
 
       - name: Create libyaml dependency package
