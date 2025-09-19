@@ -121,6 +121,7 @@ jobs:
       - name: Build Fluent Bit packages
         run: |
           export LIBRARY_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$LIBRARY_PATH
+          export HOMEBREW_DEPENDENCIES="libyaml openssl bison flex pkgconfig"
           cmake -DCMAKE_INSTALL_PREFIX=/Library/Management/fluent-bit -DCPACK_GENERATOR=productbuild -DFLB_NIGHTLY_BUILD=false ../ -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
           cmake --build .
         working-directory: build
@@ -140,10 +141,11 @@ jobs:
           
           # Create a temp file to store the dependency information for later steps
           DEPS_INFO="$(pwd)/deps_info.txt"
-          otool -L "$FLUENT_BIT_BIN" | grep -v "@executable_path" | grep -v "/usr/lib/" | grep -v "$FLUENT_BIT_BIN" | awk '{print $1}' > "$DEPS_INFO"
+          # Only look for dependencies in Homebrew's opt directory
+          otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | awk '{print $1}' > "$DEPS_INFO"
           
           # Find each dependency in the homebrew paths
-          echo "Identifying all dependencies for patching..."
+          echo "Identifying Homebrew dependencies for patching..."
           HOMEBREW_PREFIX=$(brew --prefix)
           
           # Process specific known dependencies first
@@ -162,12 +164,12 @@ jobs:
           FRAMEWORKS_DIR="$BINARY_DIR/../Frameworks"
           mkdir -p "$FRAMEWORKS_DIR"
           
-          # Get all library dependencies
-          echo "Identifying all library dependencies..."
+          # Get all Homebrew library dependencies
+          echo "Identifying Homebrew dependencies for patching..."
           
           # Use a more shell-compatible approach for processing dependencies
           # Save dependencies to a file and process them one by one
-          otool -L "$FLUENT_BIT_BIN" | grep -v "@executable_path" | grep -v "/usr/lib/" | grep -v "$FLUENT_BIT_BIN" | awk '{print $1}' > deps.txt
+          otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | awk '{print $1}' > deps.txt
           
           # Process each dependency
           echo "Processing all dependencies with install_name_tool..."
@@ -198,16 +200,16 @@ jobs:
           
           # Check for yaml dependency
           echo "Checking dependencies..."
-          DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep yaml)
+          DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep yaml)
           echo "$DEPS"
           
-          # Find the exact libyaml path being referenced
-          YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep libyaml | awk '{print $1}')
+          # Find the exact libyaml path being referenced from Homebrew
+          YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep libyaml | awk '{print $1}')
           if [ -z "$YAML_REF" ]; then
-            echo "No libyaml dependency found, skipping package creation"
+            echo "No Homebrew libyaml dependency found, skipping package creation"
             exit 0
           fi
-          echo "Binary references yaml library: $YAML_REF"
+          echo "Binary references yaml library from Homebrew: $YAML_REF"
           
           # Get the actual file path from the brew installation
           YAML_DIR=$(brew --prefix libyaml)/lib
@@ -268,14 +270,14 @@ jobs:
           FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
           echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
           
-          # Check for OpenSSL dependencies
-          echo "Checking for OpenSSL dependencies..."
-          OPENSSL_DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep -E 'libssl|libcrypto')
+          # Check for OpenSSL dependencies from Homebrew
+          echo "Checking for OpenSSL dependencies from Homebrew..."
+          OPENSSL_DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep -E 'libssl|libcrypto')
           echo "$OPENSSL_DEPS"
           
           # If no OpenSSL dependencies, exit early
           if [ -z "$OPENSSL_DEPS" ]; then
-            echo "No OpenSSL dependencies found, skipping package creation"
+            echo "No Homebrew OpenSSL dependencies found, skipping package creation"
             exit 0
           fi
           
@@ -294,8 +296,8 @@ jobs:
           INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
           mkdir -p "$INSTALL_DIR"
           
-          # Find and copy all OpenSSL libraries needed by the binary
-          for LIB_REF in $(otool -L "$FLUENT_BIT_BIN" | grep -E 'libssl|libcrypto' | awk '{print $1}'); do
+          # Find and copy all OpenSSL libraries needed by the binary from Homebrew
+          for LIB_REF in $(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep -E 'libssl|libcrypto' | awk '{print $1}'); do
             LIB_FILE=$(basename "$LIB_REF")
             LIB_PATH="$OPENSSL_DIR/$LIB_FILE"
             
