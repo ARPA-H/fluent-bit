@@ -510,6 +510,101 @@ jobs:
           rm -rf "$STAGING_DIR"
         shell: bash
 
+      - name: Create unified dependencies package
+        run: |
+          echo "Creating unified dependencies package..."
+          
+          # Create a directory to store all dependency packages
+          DEPS_DIR="build/dependencies"
+          mkdir -p "$DEPS_DIR"
+          
+          # Move all dependency packages to the dependencies directory
+          mv build/fluent-bit-libyaml-*-apple.pkg "$DEPS_DIR/"
+          mv build/fluent-bit-openssl-*-apple.pkg "$DEPS_DIR/"
+          mv build/fluent-bit-bison-*-apple.pkg "$DEPS_DIR/"
+          mv build/fluent-bit-flex-*-apple.pkg "$DEPS_DIR/"
+          mv build/fluent-bit-pkgconfig-*-apple.pkg "$DEPS_DIR/"
+          
+          # Get version from main package name
+          VERSION=$(ls build/fluent-bit-*-apple.pkg | grep -v "libyaml\|openssl\|bison\|flex\|pkgconfig" | sed -E 's/.*fluent-bit-([0-9]+\.[0-9]+\.[0-9]+)-apple\.pkg/\1/')
+          echo "Detected version: $VERSION"
+          
+          # Create an installation script in the dependencies directory
+          cat > "$DEPS_DIR/install_dependencies.sh" << 'EOL'
+#!/bin/bash
+# Fluent Bit Dependencies Installation Script
+set -e
+
+# Find the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+echo "Installing dependencies from: $SCRIPT_DIR"
+
+# Install all dependencies in the correct order
+echo "Installing libyaml dependency..."
+sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-libyaml-*-apple.pkg -target /
+
+echo "Installing OpenSSL dependency..."
+sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-openssl-*-apple.pkg -target /
+
+echo "Installing bison dependency..."
+sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-bison-*-apple.pkg -target /
+
+echo "Installing flex dependency..."
+sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-flex-*-apple.pkg -target /
+
+echo "Installing pkg-config dependency..."
+sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-pkgconfig-*-apple.pkg -target /
+
+echo "All dependencies successfully installed."
+echo "You can now install the main Fluent Bit package."
+EOL
+
+          # Make the installation script executable
+          chmod +x "$DEPS_DIR/install_dependencies.sh"
+          
+          # Create a README file explaining the installation process
+          cat > "$DEPS_DIR/README.md" << EOL
+# Fluent Bit macOS Dependencies
+
+This directory contains all the dependencies required by Fluent Bit on macOS.
+
+## Quick Installation
+
+To install all dependencies at once, run:
+
+\`\`\`bash
+# Make the script executable (if needed)
+chmod +x install_dependencies.sh
+
+# Run the installation script
+./install_dependencies.sh
+\`\`\`
+
+## Manual Installation
+
+If you prefer to install dependencies manually, install them in this order:
+
+1. \`fluent-bit-libyaml-*-apple.pkg\` - YAML parsing library
+2. \`fluent-bit-openssl-*-apple.pkg\` - OpenSSL libraries
+3. \`fluent-bit-bison-*-apple.pkg\` - GNU Bison parser generator
+4. \`fluent-bit-flex-*-apple.pkg\` - Fast lexical analyzer
+5. \`fluent-bit-pkgconfig-*-apple.pkg\` - Package configuration tool
+
+For example:
+\`\`\`bash
+sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /
+\`\`\`
+
+After installing all dependencies, install the main Fluent Bit package.
+EOL
+          
+          # Create the archive
+          cd build
+          DEPS_ARCHIVE="fluent-bit-dependencies-${VERSION}-macos.tar.gz"
+          tar -czf "$DEPS_ARCHIVE" dependencies
+          echo "Created dependencies archive: $DEPS_ARCHIVE"
+        shell: bash
+
       - name: Build pkg with cpack
         run: cpack -G productbuild
         working-directory: build
@@ -517,34 +612,54 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/fluent-bit-*-apple*.pkg
+          files: |
+            build/fluent-bit-*-apple.pkg
+            build/fluent-bit-dependencies-*-macos.tar.gz
           tag_name: ${{ needs.sync.outputs.latest_tag }}
           body: |
             ## Fluent Bit Release ${{ needs.sync.outputs.latest_tag }}
             
             This release includes the following packages:
             
-            ### Dependencies (Install in this order):
-            1. **fluent-bit-libyaml-*-apple.pkg** - YAML parsing library
-            2. **fluent-bit-openssl-*-apple.pkg** - OpenSSL libraries
-            3. **fluent-bit-bison-*-apple.pkg** - GNU Bison parser generator
-            4. **fluent-bit-flex-*-apple.pkg** - Fast lexical analyzer
-            5. **fluent-bit-pkgconfig-*-apple.pkg** - Package configuration tool
+            ### 1. Main Application Package:
+            - **fluent-bit-*-apple.pkg** - Main Fluent Bit package
             
-            ### Main Application (Install Last):
-            6. **fluent-bit-*-apple.pkg** - Main Fluent Bit package
+            ### 2. Dependencies Archive:
+            - **fluent-bit-dependencies-*-macos.tar.gz** - All required dependencies bundled together
             
-            ### Installation Instructions:
+            ## Installation Instructions
+            
+            ### Option 1: Using the Dependencies Archive (Recommended)
+            
             ```bash
-            # Install all dependencies first
-            sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /
-            sudo installer -pkg fluent-bit-openssl-*-apple.pkg -target /
-            sudo installer -pkg fluent-bit-bison-*-apple.pkg -target /
-            sudo installer -pkg fluent-bit-flex-*-apple.pkg -target /
-            sudo installer -pkg fluent-bit-pkgconfig-*-apple.pkg -target /
+            # 1. Download and extract the dependencies archive
+            tar -xzf fluent-bit-dependencies-*-macos.tar.gz
             
-            # Then install the main Fluent Bit package
+            # 2. Install all dependencies at once
+            cd dependencies
+            ./install_dependencies.sh
+            
+            # 3. Install the main Fluent Bit package
+            sudo installer -pkg /path/to/fluent-bit-*-apple.pkg -target /
+            ```
+            
+            ### Option 2: Manual Installation
+            
+            If you prefer to install packages individually, install them in this order:
+            
+            ```bash
+            # Extract dependencies archive first
+            tar -xzf fluent-bit-dependencies-*-macos.tar.gz
+            
+            # Install dependencies one by one
+            sudo installer -pkg dependencies/fluent-bit-libyaml-*-apple.pkg -target /
+            sudo installer -pkg dependencies/fluent-bit-openssl-*-apple.pkg -target /
+            sudo installer -pkg dependencies/fluent-bit-bison-*-apple.pkg -target /
+            sudo installer -pkg dependencies/fluent-bit-flex-*-apple.pkg -target /
+            sudo installer -pkg dependencies/fluent-bit-pkgconfig-*-apple.pkg -target /
+            
+            # Install main package
             sudo installer -pkg fluent-bit-*-apple.pkg -target /
             ```
             
-            All dependencies will be installed to `/Library/Management/fluent-bit/` with libraries in the Frameworks subdirectory and executables in the bin subdirectory to ensure proper dependency resolution.
+            All components are installed to `/Library/Management/fluent-bit/` with libraries in the Frameworks subdirectory and executables in the bin subdirectory.
