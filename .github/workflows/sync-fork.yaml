@@ -198,11 +198,6 @@ jobs:
           FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
           echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
           
-          # Check for yaml dependency
-          echo "Checking dependencies..."
-          DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep yaml)
-          echo "$DEPS"
-          
           # Find the exact libyaml path being referenced from Homebrew
           YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep libyaml | awk '{print $1}')
           if [ -z "$YAML_REF" ]; then
