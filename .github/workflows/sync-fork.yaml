@@ -526,7 +526,7 @@ jobs:
           mv build/fluent-bit-pkgconfig-*-apple.pkg "$DEPS_DIR/"
           
           # Get version from main package name
-          VERSION=$(ls build/fluent-bit-*-apple.pkg | grep -v "libyaml\|openssl\|bison\|flex\|pkgconfig" | sed -E 's/.*fluent-bit-([0-9]+\.[0-9]+\.[0-9]+)-apple\.pkg/\1/')
+          VERSION=${{ needs.sync.outputs.latest_tag }}
           echo "Detected version: $VERSION"
           
           # Create an installation script in the dependencies directory
