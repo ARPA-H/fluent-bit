@@ -530,73 +530,69 @@ jobs:
           echo "Detected version: $VERSION"
           
           # Create an installation script in the dependencies directory
-          cat > "$DEPS_DIR/install_dependencies.sh" << 'EOL'
-#!/bin/bash
-# Fluent Bit Dependencies Installation Script
-set -e
-
-# Find the directory where this script is located
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-echo "Installing dependencies from: $SCRIPT_DIR"
-
-# Install all dependencies in the correct order
-echo "Installing libyaml dependency..."
-sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-libyaml-*-apple.pkg -target /
-
-echo "Installing OpenSSL dependency..."
-sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-openssl-*-apple.pkg -target /
-
-echo "Installing bison dependency..."
-sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-bison-*-apple.pkg -target /
-
-echo "Installing flex dependency..."
-sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-flex-*-apple.pkg -target /
-
-echo "Installing pkg-config dependency..."
-sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-pkgconfig-*-apple.pkg -target /
-
-echo "All dependencies successfully installed."
-echo "You can now install the main Fluent Bit package."
-EOL
+          echo '#!/bin/bash' > "$DEPS_DIR/install_dependencies.sh"
+          echo '# Fluent Bit Dependencies Installation Script' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'set -e' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '# Find the directory where this script is located' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "Installing dependencies from: $SCRIPT_DIR"' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '# Install all dependencies in the correct order' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "Installing libyaml dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-libyaml-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "Installing OpenSSL dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-openssl-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "Installing bison dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-bison-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "Installing flex dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-flex-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "Installing pkg-config dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-pkgconfig-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
+          echo '' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "All dependencies successfully installed."' >> "$DEPS_DIR/install_dependencies.sh"
+          echo 'echo "You can now install the main Fluent Bit package."' >> "$DEPS_DIR/install_dependencies.sh"
 
           # Make the installation script executable
           chmod +x "$DEPS_DIR/install_dependencies.sh"
           
           # Create a README file explaining the installation process
-          cat > "$DEPS_DIR/README.md" << EOL
-# Fluent Bit macOS Dependencies
-
-This directory contains all the dependencies required by Fluent Bit on macOS.
-
-## Quick Installation
-
-To install all dependencies at once, run:
-
-\`\`\`bash
-# Make the script executable (if needed)
-chmod +x install_dependencies.sh
-
-# Run the installation script
-./install_dependencies.sh
-\`\`\`
-
-## Manual Installation
-
-If you prefer to install dependencies manually, install them in this order:
-
-1. \`fluent-bit-libyaml-*-apple.pkg\` - YAML parsing library
-2. \`fluent-bit-openssl-*-apple.pkg\` - OpenSSL libraries
-3. \`fluent-bit-bison-*-apple.pkg\` - GNU Bison parser generator
-4. \`fluent-bit-flex-*-apple.pkg\` - Fast lexical analyzer
-5. \`fluent-bit-pkgconfig-*-apple.pkg\` - Package configuration tool
-
-For example:
-\`\`\`bash
-sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /
-\`\`\`
-
-After installing all dependencies, install the main Fluent Bit package.
-EOL
+          echo '# Fluent Bit macOS Dependencies' > "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo 'This directory contains all the dependencies required by Fluent Bit on macOS.' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo '## Quick Installation' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo 'To install all dependencies at once, run:' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo '```bash' >> "$DEPS_DIR/README.md"
+          echo '# Make the script executable (if needed)' >> "$DEPS_DIR/README.md"
+          echo 'chmod +x install_dependencies.sh' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo '# Run the installation script' >> "$DEPS_DIR/README.md"
+          echo './install_dependencies.sh' >> "$DEPS_DIR/README.md"
+          echo '```' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo '## Manual Installation' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo 'If you prefer to install dependencies manually, install them in this order:' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo '1. `fluent-bit-libyaml-*-apple.pkg` - YAML parsing library' >> "$DEPS_DIR/README.md"
+          echo '2. `fluent-bit-openssl-*-apple.pkg` - OpenSSL libraries' >> "$DEPS_DIR/README.md"
+          echo '3. `fluent-bit-bison-*-apple.pkg` - GNU Bison parser generator' >> "$DEPS_DIR/README.md"
+          echo '4. `fluent-bit-flex-*-apple.pkg` - Fast lexical analyzer' >> "$DEPS_DIR/README.md"
+          echo '5. `fluent-bit-pkgconfig-*-apple.pkg` - Package configuration tool' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo 'For example:' >> "$DEPS_DIR/README.md"
+          echo '```bash' >> "$DEPS_DIR/README.md"
+          echo 'sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /' >> "$DEPS_DIR/README.md"
+          echo '```' >> "$DEPS_DIR/README.md"
+          echo '' >> "$DEPS_DIR/README.md"
+          echo 'After installing all dependencies, install the main Fluent Bit package.' >> "$DEPS_DIR/README.md"
           
           # Create the archive
           cd build
