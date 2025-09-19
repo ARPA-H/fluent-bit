@@ -126,6 +126,7 @@ jobs:
         working-directory: build
 
       - name: Identify dependencies and fix install names
+        shell: bash
         run: |
           echo "Current working directory: $(pwd)"
           
@@ -145,16 +146,15 @@ jobs:
           echo "Identifying all dependencies for patching..."
           HOMEBREW_PREFIX=$(brew --prefix)
           
-          # Create an array to store dependency info
-          declare -A DEP_INFO
-          
           # Process specific known dependencies first
           # libyaml
           YAML_REF=$(grep libyaml "$DEPS_INFO" | head -1 || echo "")
           if [ -n "$YAML_REF" ]; then
             YAML_FILE=$(basename "$YAML_REF")
             echo "Found libyaml dependency: $YAML_REF -> $YAML_FILE"
-            DEP_INFO["libyaml"]="$YAML_REF:$YAML_FILE"
+            # Store dependency info in environment variables instead of associative array
+            export LIBYAML_REF="$YAML_REF"
+            export LIBYAML_FILE="$YAML_FILE"
           fi
           
           # Create Frameworks directory in the same location as the binary
@@ -164,11 +164,14 @@ jobs:
           
           # Get all library dependencies
           echo "Identifying all library dependencies..."
-          DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep -v "@executable_path" | grep -v "/usr/lib/" | grep -v "$FLUENT_BIT_BIN" | awk '{print $1}')
+          
+          # Use a more shell-compatible approach for processing dependencies
+          # Save dependencies to a file and process them one by one
+          otool -L "$FLUENT_BIT_BIN" | grep -v "@executable_path" | grep -v "/usr/lib/" | grep -v "$FLUENT_BIT_BIN" | awk '{print $1}' > deps.txt
           
           # Process each dependency
           echo "Processing all dependencies with install_name_tool..."
-          while IFS= read -r DEP_PATH; do
+          cat deps.txt | while read DEP_PATH; do
             if [ -n "$DEP_PATH" ]; then
               DEP_FILE=$(basename "$DEP_PATH")
               echo "Processing dependency: $DEP_PATH -> $DEP_FILE"
@@ -176,13 +179,14 @@ jobs:
               # Change library reference in the binary
               install_name_tool -change "$DEP_PATH" "@executable_path/../Frameworks/$DEP_FILE" "$FLUENT_BIT_BIN"
             fi
-          done <<< "$DEPS"
+          done
+          
+          # Clean up
+          rm -f deps.txt
           
           # Verify the changes
           echo "After patching, new dependencies:"
           otool -L "$FLUENT_BIT_BIN" | grep @executable_path
-
-        shell: bash
 
       - name: Create libyaml dependency package
         run: |
