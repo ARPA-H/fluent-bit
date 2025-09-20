@@ -129,47 +129,81 @@ jobs:
       - name: Copy Dependencies and Fix Install Names
         run: |
           echo "Current working directory: $(pwd)"
-          
+        
           # Find the fluent-bit binary
           FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
           echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
-          
+        
           # Create Frameworks directory
           BINARY_DIR=$(dirname "$FLUENT_BIT_BIN")
           FRAMEWORKS_DIR="$BINARY_DIR/../Frameworks"
           mkdir -p "$FRAMEWORKS_DIR"
-          
+        
           # Get list of dependencies (excluding system libraries)
           deps=$(otool -L "$FLUENT_BIT_BIN" | grep -v "/usr/lib\|/System" | awk '{print $1}' | grep -E '\.dylib|\.so')
-          
+        
           for dep in $deps; do
-              if [ -f "$dep" ]; then
-                  echo "Copying $dep"
-                  cp "$dep" "$FRAMEWORKS_DIR/"
+              if [ -f "$dep" ] || [ -L "$dep" ]; then
+                  echo "Processing: $dep"
                   base=$(basename "$dep")
-                  
-                  # Update the binary to look for the library in @executable_path
-                  install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$FLUENT_BIT_BIN"
-                  
-                  # Update the library's own install name
-                  install_name_tool -id "@loader_path/$base" "$FRAMEWORKS_DIR/$base"
-                  
-                  # Recursively handle dependencies of this library
-                  subdeps=$(otool -L "$FRAMEWORKS_DIR/$base" | grep -v "/usr/lib\|/System" | awk '{print $1}' | grep -E '\.dylib|\.so')
-                  for subdep in $subdeps; do
-                      if [ -f "$subdep" ] && [ ! -f "$FRAMEWORKS_DIR/$(basename $subdep)" ]; then
-                          cp "$subdep" "$FRAMEWORKS_DIR/"
-                          subbase=$(basename "$subdep")
-                          install_name_tool -change "$subdep" "@loader_path/$subbase" "$FRAMEWORKS_DIR/$base"
-                          install_name_tool -id "@loader_path/$subbase" "$FRAMEWORKS_DIR/$subbase"
-                      fi
-                  done
+                
+                  # Try copying with -L to follow symlinks, and handle permission errors
+                  if cp -L "$dep" "$FRAMEWORKS_DIR/" 2>/dev/null; then
+                      echo "Successfully copied $dep"
+                  else
+                      echo "Failed to copy $dep with cp -L, trying with sudo..."
+                      sudo cp -L "$dep" "$FRAMEWORKS_DIR/" || {
+                          echo "Warning: Could not copy $dep even with sudo, trying to find actual file..."
+                          # If it's a symlink, try to resolve it
+                          if [ -L "$dep" ]; then
+                              real_file=$(readlink -f "$dep" 2>/dev/null || readlink "$dep")
+                              echo "Resolved symlink to: $real_file"
+                              if [ -f "$real_file" ]; then
+                                  sudo cp "$real_file" "$FRAMEWORKS_DIR/$base" || echo "Warning: Could not copy resolved file $real_file"
+                              fi
+                          fi
+                      }
+                  fi
+                
+                  # Only try to update install names if the file was successfully copied
+                  if [ -f "$FRAMEWORKS_DIR/$base" ]; then
+                      # Update the binary to look for the library in @executable_path
+                      install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$FLUENT_BIT_BIN"
+                    
+                      # Update the library's own install name
+                      install_name_tool -id "@loader_path/$base" "$FRAMEWORKS_DIR/$base"
+                    
+                      # Recursively handle dependencies of this library
+                      subdeps=$(otool -L "$FRAMEWORKS_DIR/$base" | grep -v "/usr/lib\|/System" | awk '{print $1}' | grep -E '\.dylib|\.so')
+                      for subdep in $subdeps; do
+                          if [ -f "$subdep" ] && [ ! -f "$FRAMEWORKS_DIR/$(basename $subdep)" ]; then
+                              subbase=$(basename "$subdep")
+                              # Use the same copy approach for subdependencies
+                              if cp -L "$subdep" "$FRAMEWORKS_DIR/" 2>/dev/null; then
+                                  echo "Successfully copied subdep $subdep"
+                              else
+                                  sudo cp -L "$subdep" "$FRAMEWORKS_DIR/" 2>/dev/null || echo "Warning: Could not copy subdep $subdep"
+                              fi
+                            
+                              if [ -f "$FRAMEWORKS_DIR/$subbase" ]; then
+                                  install_name_tool -change "$subdep" "@loader_path/$subbase" "$FRAMEWORKS_DIR/$base"
+                                  install_name_tool -id "@loader_path/$subbase" "$FRAMEWORKS_DIR/$subbase"
+                              fi
+                          fi
+                      done
+                  else
+                      echo "Warning: $base was not copied to Frameworks directory, skipping install_name_tool updates"
+                  fi
               fi
           done
-          
+        
           # Verify the changes
           echo "After patching, new dependencies:"
           otool -L "$FLUENT_BIT_BIN" | grep @executable_path
+        
+          # List what's actually in the Frameworks directory
+          echo "Contents of Frameworks directory:"
+          ls -la "$FRAMEWORKS_DIR"
 
       - name: Build Package
         run: |
