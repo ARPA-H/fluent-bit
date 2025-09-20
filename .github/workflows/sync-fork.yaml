@@ -192,7 +192,7 @@ jobs:
                           fi
                       done
 
-                      cosdesign --force --sign - "$FRAMEWORKS_DIR/$base"
+                      codesign --force --sign - "$FRAMEWORKS_DIR/$base"
                   else
                       echo "Warning: $base was not copied to Frameworks directory, skipping install_name_tool updates"
                   fi
