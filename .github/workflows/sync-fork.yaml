@@ -92,7 +92,7 @@ jobs:
 
           echo "build_required=$BUILD_REQUIRED" >> "$GITHUB_OUTPUT"
 
-  build-and-relase:
+  build-and-release:
     runs-on: macos-14
     if: needs.sync.outputs.should_build == 'true'
     needs: sync
@@ -118,7 +118,7 @@ jobs:
         with:
           cmake-version: "3.31.6"
 
-      - name: Build Fluent Bit packages
+      - name: Build Fluent Bit
         run: |
           export LIBRARY_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$LIBRARY_PATH
           export HOMEBREW_DEPENDENCIES="libyaml openssl bison flex pkgconfig"
@@ -126,8 +126,7 @@ jobs:
           cmake --build .
         working-directory: build
 
-      - name: Identify dependencies and fix install names
-        shell: bash
+      - name: Copy Dependencies and Fix Install Names
         run: |
           echo "Current working directory: $(pwd)"
           
@@ -135,524 +134,93 @@ jobs:
           FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
           echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
           
-          # Check what libraries the binary depends on
-          echo "Dependencies before patching:"
-          otool -L "$FLUENT_BIT_BIN" | grep dylib
-          
-          # Create a temp file to store the dependency information for later steps
-          DEPS_INFO="$(pwd)/deps_info.txt"
-          # Only look for dependencies in Homebrew's opt directory
-          otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | awk '{print $1}' > "$DEPS_INFO"
-          
-          # Find each dependency in the homebrew paths
-          echo "Identifying Homebrew dependencies for patching..."
-          HOMEBREW_PREFIX=$(brew --prefix)
-          
-          # Process specific known dependencies first
-          # libyaml
-          YAML_REF=$(grep libyaml "$DEPS_INFO" | head -1 || echo "")
-          if [ -n "$YAML_REF" ]; then
-            YAML_FILE=$(basename "$YAML_REF")
-            echo "Found libyaml dependency: $YAML_REF -> $YAML_FILE"
-            # Store dependency info in environment variables instead of associative array
-            export LIBYAML_REF="$YAML_REF"
-            export LIBYAML_FILE="$YAML_FILE"
-          fi
-          
-          # Create Frameworks directory in the same location as the binary
+          # Create Frameworks directory
           BINARY_DIR=$(dirname "$FLUENT_BIT_BIN")
           FRAMEWORKS_DIR="$BINARY_DIR/../Frameworks"
           mkdir -p "$FRAMEWORKS_DIR"
           
-          # Get all Homebrew library dependencies
-          echo "Identifying Homebrew dependencies for patching..."
+          # Get list of dependencies (excluding system libraries)
+          deps=$(otool -L "$FLUENT_BIT_BIN" | grep -v "/usr/lib\|/System" | awk '{print $1}' | grep -E '\.dylib|\.so')
           
-          # Use a more shell-compatible approach for processing dependencies
-          # Save dependencies to a file and process them one by one
-          otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | awk '{print $1}' > deps.txt
-          
-          # Process each dependency
-          echo "Processing all dependencies with install_name_tool..."
-          cat deps.txt | while read DEP_PATH; do
-            if [ -n "$DEP_PATH" ]; then
-              DEP_FILE=$(basename "$DEP_PATH")
-              echo "Processing dependency: $DEP_PATH -> $DEP_FILE"
-              
-              # Change library reference in the binary
-              install_name_tool -change "$DEP_PATH" "@executable_path/../Frameworks/$DEP_FILE" "$FLUENT_BIT_BIN"
-            fi
+          for dep in $deps; do
+              if [ -f "$dep" ]; then
+                  echo "Copying $dep"
+                  cp "$dep" "$FRAMEWORKS_DIR/"
+                  base=$(basename "$dep")
+                  
+                  # Update the binary to look for the library in @executable_path
+                  install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$FLUENT_BIT_BIN"
+                  
+                  # Update the library's own install name
+                  install_name_tool -id "@loader_path/$base" "$FRAMEWORKS_DIR/$base"
+                  
+                  # Recursively handle dependencies of this library
+                  subdeps=$(otool -L "$FRAMEWORKS_DIR/$base" | grep -v "/usr/lib\|/System" | awk '{print $1}' | grep -E '\.dylib|\.so')
+                  for subdep in $subdeps; do
+                      if [ -f "$subdep" ] && [ ! -f "$FRAMEWORKS_DIR/$(basename $subdep)" ]; then
+                          cp "$subdep" "$FRAMEWORKS_DIR/"
+                          subbase=$(basename "$subdep")
+                          install_name_tool -change "$subdep" "@loader_path/$subbase" "$FRAMEWORKS_DIR/$base"
+                          install_name_tool -id "@loader_path/$subbase" "$FRAMEWORKS_DIR/$subbase"
+                      fi
+                  done
+              fi
           done
-          
-          # Clean up
-          rm -f deps.txt
           
           # Verify the changes
           echo "After patching, new dependencies:"
           otool -L "$FLUENT_BIT_BIN" | grep @executable_path
 
-      - name: Create libyaml dependency package
+      - name: Build Package
         run: |
-          echo "Creating separate libyaml dependency package..."
-          
-          # Find the fluent-bit binary to identify required dependencies
-          FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
-          echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
-          
-          # Find the exact libyaml path being referenced from Homebrew
-          YAML_REF=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep libyaml | awk '{print $1}')
-          if [ -z "$YAML_REF" ]; then
-            echo "No Homebrew libyaml dependency found, skipping package creation"
-            exit 0
-          fi
-          echo "Binary references yaml library from Homebrew: $YAML_REF"
-          
-          # Get the actual file path from the brew installation
-          YAML_DIR=$(brew --prefix libyaml)/lib
-          echo "libyaml library directory: $YAML_DIR"
-          echo "Available yaml libraries:"
-          ls -la "$YAML_DIR" | grep yaml
-          
-          # Find the dylib file that corresponds to the reference
-          YAML_FILE=$(basename "$YAML_REF")
-          YAML_PATH="$YAML_DIR/$YAML_FILE"
-          if [ ! -f "$YAML_PATH" ]; then
-            # Try to find by pattern if exact file not found
-            YAML_PATH=$(find "$YAML_DIR" -name "libyaml*.dylib" | head -1)
-            if [ -z "$YAML_PATH" ]; then
-              echo "Error: Could not find libyaml library"
-              exit 1
-            fi
-            YAML_FILE=$(basename "$YAML_PATH")
-          fi
-          echo "Using yaml library: $YAML_PATH"
-          
-          # Get version information from libyaml
-          LIBYAML_VERSION=$(brew info --json=v2 libyaml | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "0.2.5")
-          echo "libyaml version: $LIBYAML_VERSION"
-          
-          # Create a directory structure for the libyaml package
-          STAGING_DIR=$(mktemp -d)
-          INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
-          mkdir -p "$INSTALL_DIR"
-          
-          # Copy the libyaml library to the staging directory
-          cp "$YAML_PATH" "$INSTALL_DIR/$YAML_FILE"
-          echo "Copied $YAML_PATH to $INSTALL_DIR/$YAML_FILE"
-          
-          # Create a simple pkg using pkgbuild
-          LIBYAML_PKG="build/fluent-bit-libyaml-$LIBYAML_VERSION-apple.pkg"
-          pkgbuild --root "$STAGING_DIR" \
-                   --identifier "com.fluentbit.pkg.libyaml" \
-                   --version "$LIBYAML_VERSION" \
-                   --install-location "/" \
-                   "$LIBYAML_PKG"
-          
-          echo "Created libyaml package: $LIBYAML_PKG"
-          
-          # Clean up
-          rm -rf "$STAGING_DIR"
-          
-          # Optionally sign the package
-          # productsign --sign "Developer ID Installer: Your Name" "$LIBYAML_PKG" "$LIBYAML_PKG.signed"
-          # mv "$LIBYAML_PKG.signed" "$LIBYAML_PKG"
-        shell: bash
-        
-      - name: Create OpenSSL dependency package
-        run: |
-          echo "Creating separate OpenSSL dependency package..."
-          
-          # Find the fluent-bit binary to identify required dependencies
-          FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
-          echo "Found fluent-bit binary at: $FLUENT_BIT_BIN"
-          
-          # Check for OpenSSL dependencies from Homebrew
-          echo "Checking for OpenSSL dependencies from Homebrew..."
-          OPENSSL_DEPS=$(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep -E 'libssl|libcrypto')
-          echo "$OPENSSL_DEPS"
-          
-          # If no OpenSSL dependencies, exit early
-          if [ -z "$OPENSSL_DEPS" ]; then
-            echo "No Homebrew OpenSSL dependencies found, skipping package creation"
-            exit 0
-          fi
-          
-          # Get the OpenSSL brew installation path
-          OPENSSL_DIR=$(brew --prefix openssl)/lib
-          echo "OpenSSL library directory: $OPENSSL_DIR"
-          echo "Available OpenSSL libraries:"
-          ls -la "$OPENSSL_DIR" | grep -E 'libssl|libcrypto'
-          
-          # Get version information from OpenSSL
-          OPENSSL_VERSION=$(brew info --json=v2 openssl | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "3.0.0")
-          echo "OpenSSL version: $OPENSSL_VERSION"
-          
-          # Create a directory structure for the OpenSSL package
-          STAGING_DIR=$(mktemp -d)
-          INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
-          mkdir -p "$INSTALL_DIR"
-          
-          # Find and copy all OpenSSL libraries needed by the binary from Homebrew
-          for LIB_REF in $(otool -L "$FLUENT_BIT_BIN" | grep "/opt/homebrew/opt/" | grep -E 'libssl|libcrypto' | awk '{print $1}'); do
-            LIB_FILE=$(basename "$LIB_REF")
-            LIB_PATH="$OPENSSL_DIR/$LIB_FILE"
-            
-            # If direct file not found, try to find it
-            if [ ! -f "$LIB_PATH" ]; then
-              # Try to match by pattern
-              PATTERN=$(echo "$LIB_FILE" | sed 's/\.[0-9]*\.[0-9]*$/.*/')
-              LIB_PATH=$(find "$OPENSSL_DIR" -name "$PATTERN" | head -1)
-              
-              if [ -z "$LIB_PATH" ]; then
-                echo "Warning: Could not find OpenSSL library $LIB_FILE"
-                continue
-              fi
-              LIB_FILE=$(basename "$LIB_PATH")
-            fi
-            
-            # Copy the library
-            echo "Copying $LIB_PATH to $INSTALL_DIR/$LIB_FILE"
-            cp "$LIB_PATH" "$INSTALL_DIR/$LIB_FILE"
-            
-            # If this is a symlink, follow and copy the actual library
-            if [[ -L "$LIB_PATH" ]]; then
-              REAL_LIB=$(readlink "$LIB_PATH")
-              if [[ "$REAL_LIB" != /* ]]; then
-                REAL_LIB="$OPENSSL_DIR/$REAL_LIB"
-              fi
-              REAL_LIB_FILE=$(basename "$REAL_LIB")
-              echo "Copying linked library $REAL_LIB to $INSTALL_DIR/$REAL_LIB_FILE"
-              cp "$REAL_LIB" "$INSTALL_DIR/$REAL_LIB_FILE"
-            fi
-          done
-          
-          # Create a simple pkg using pkgbuild
-          OPENSSL_PKG="build/fluent-bit-openssl-$OPENSSL_VERSION-apple.pkg"
-          pkgbuild --root "$STAGING_DIR" \
-                  --identifier "com.fluentbit.pkg.openssl" \
-                  --version "$OPENSSL_VERSION" \
-                  --install-location "/" \
-                  "$OPENSSL_PKG"
-          
-          echo "Created OpenSSL package: $OPENSSL_PKG"
-          
-          # Clean up
-          rm -rf "$STAGING_DIR"
-        shell: bash
-        
-      - name: Create bison dependency package
-        run: |
-          echo "Creating separate bison dependency package..."
-          
-          # Get the bison installation path
-          BISON_DIR=$(brew --prefix bison)
-          BISON_BIN_DIR="$BISON_DIR/bin"
-          BISON_LIB_DIR="$BISON_DIR/lib"
-          
-          echo "Bison binary directory: $BISON_BIN_DIR"
-          echo "Bison library directory: $BISON_LIB_DIR"
-          
-          # Get version information from bison
-          BISON_VERSION=$(brew info --json=v2 bison | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "3.8.2")
-          echo "Bison version: $BISON_VERSION"
-          
-          # Create a directory structure for the bison package
-          STAGING_DIR=$(mktemp -d)
-          BIN_INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/bin"
-          LIB_INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/lib"
-          FRAMEWORKS_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
-          
-          mkdir -p "$BIN_INSTALL_DIR"
-          mkdir -p "$LIB_INSTALL_DIR"
-          mkdir -p "$FRAMEWORKS_DIR"
-          
-          # Copy bison executable and related files
-          if [ -f "$BISON_BIN_DIR/bison" ]; then
-            echo "Copying bison executable and related files"
-            cp "$BISON_BIN_DIR/bison" "$BIN_INSTALL_DIR/"
-            cp -R "$BISON_DIR/share" "$STAGING_DIR/Library/Management/fluent-bit/"
-          else
-            echo "Warning: bison executable not found"
-          fi
-          
-          # Copy bison libraries
-          echo "Copying bison libraries"
-          for LIB_PATH in "$BISON_LIB_DIR"/liby*.dylib; do
-            if [ -f "$LIB_PATH" ]; then
-              LIB_FILE=$(basename "$LIB_PATH")
-              echo "Copying $LIB_PATH to $FRAMEWORKS_DIR/$LIB_FILE"
-              cp "$LIB_PATH" "$FRAMEWORKS_DIR/$LIB_FILE"
-            fi
-          done
-          
-          # Create a simple pkg using pkgbuild
-          BISON_PKG="build/fluent-bit-bison-$BISON_VERSION-apple.pkg"
-          pkgbuild --root "$STAGING_DIR" \
-                  --identifier "com.fluentbit.pkg.bison" \
-                  --version "$BISON_VERSION" \
-                  --install-location "/" \
-                  "$BISON_PKG"
-          
-          echo "Created bison package: $BISON_PKG"
-          
-          # Clean up
-          rm -rf "$STAGING_DIR"
-        shell: bash
-        
-      - name: Create flex dependency package
-        run: |
-          echo "Creating separate flex dependency package..."
-          
-          # Get the flex installation path
-          FLEX_DIR=$(brew --prefix flex)
-          FLEX_BIN_DIR="$FLEX_DIR/bin"
-          FLEX_LIB_DIR="$FLEX_DIR/lib"
-          
-          echo "Flex binary directory: $FLEX_BIN_DIR"
-          echo "Flex library directory: $FLEX_LIB_DIR"
-          
-          # Get version information from flex
-          FLEX_VERSION=$(brew info --json=v2 flex | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "2.6.4")
-          echo "Flex version: $FLEX_VERSION"
-          
-          # Create a directory structure for the flex package
-          STAGING_DIR=$(mktemp -d)
-          BIN_INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/bin"
-          LIB_INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/lib"
-          FRAMEWORKS_DIR="$STAGING_DIR/Library/Management/fluent-bit/Frameworks"
-          
-          mkdir -p "$BIN_INSTALL_DIR"
-          mkdir -p "$LIB_INSTALL_DIR"
-          mkdir -p "$FRAMEWORKS_DIR"
-          
-          # Copy flex executable and related files
-          if [ -f "$FLEX_BIN_DIR/flex" ]; then
-            echo "Copying flex executable and related files"
-            cp "$FLEX_BIN_DIR/flex" "$BIN_INSTALL_DIR/"
-            cp -R "$FLEX_DIR/include" "$STAGING_DIR/Library/Management/fluent-bit/"
-          else
-            echo "Warning: flex executable not found"
-          fi
-          
-          # Copy flex libraries
-          echo "Copying flex libraries"
-          for LIB_PATH in "$FLEX_LIB_DIR"/libfl*.dylib; do
-            if [ -f "$LIB_PATH" ]; then
-              LIB_FILE=$(basename "$LIB_PATH")
-              echo "Copying $LIB_PATH to $FRAMEWORKS_DIR/$LIB_FILE"
-              cp "$LIB_PATH" "$FRAMEWORKS_DIR/$LIB_FILE"
-            fi
-          done
-          
-          # Create a simple pkg using pkgbuild
-          FLEX_PKG="build/fluent-bit-flex-$FLEX_VERSION-apple.pkg"
-          pkgbuild --root "$STAGING_DIR" \
-                  --identifier "com.fluentbit.pkg.flex" \
-                  --version "$FLEX_VERSION" \
-                  --install-location "/" \
-                  "$FLEX_PKG"
-          
-          echo "Created flex package: $FLEX_PKG"
-          
-          # Clean up
-          rm -rf "$STAGING_DIR"
-        shell: bash
-        
-      - name: Create pkgconfig dependency package
-        run: |
-          echo "Creating separate pkgconfig dependency package..."
-          
-          # Get the pkgconfig installation path
-          PKG_CONFIG_DIR=$(brew --prefix pkgconfig)
-          PKG_CONFIG_BIN_DIR="$PKG_CONFIG_DIR/bin"
-          
-          echo "pkg-config binary directory: $PKG_CONFIG_BIN_DIR"
-          
-          # Get version information from pkgconfig
-          PKG_CONFIG_VERSION=$(brew info --json=v2 pkgconfig | jq -r '.formulae[0].versions.stable' 2>/dev/null || echo "0.29.2")
-          echo "pkg-config version: $PKG_CONFIG_VERSION"
-          
-          # Create a directory structure for the pkgconfig package
-          STAGING_DIR=$(mktemp -d)
-          BIN_INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/bin"
-          SHARE_INSTALL_DIR="$STAGING_DIR/Library/Management/fluent-bit/share"
-          
-          mkdir -p "$BIN_INSTALL_DIR"
-          mkdir -p "$SHARE_INSTALL_DIR"
-          
-          # Copy pkgconfig executable and related files
-          if [ -f "$PKG_CONFIG_BIN_DIR/pkg-config" ]; then
-            echo "Copying pkg-config executable and related files"
-            cp "$PKG_CONFIG_BIN_DIR/pkg-config" "$BIN_INSTALL_DIR/"
-            
-            # Copy share/pkgconfig directory if it exists
-            if [ -d "$PKG_CONFIG_DIR/share/pkgconfig" ]; then
-              mkdir -p "$SHARE_INSTALL_DIR/pkgconfig"
-              cp -R "$PKG_CONFIG_DIR/share/pkgconfig" "$SHARE_INSTALL_DIR/"
-            fi
-          else
-            echo "Warning: pkg-config executable not found"
-          fi
-          
-          # Create a simple pkg using pkgbuild
-          PKG_CONFIG_PKG="build/fluent-bit-pkgconfig-$PKG_CONFIG_VERSION-apple.pkg"
-          pkgbuild --root "$STAGING_DIR" \
-                  --identifier "com.fluentbit.pkg.pkgconfig" \
-                  --version "$PKG_CONFIG_VERSION" \
-                  --install-location "/" \
-                  "$PKG_CONFIG_PKG"
-          
-          echo "Created pkg-config package: $PKG_CONFIG_PKG"
-          
-          # Clean up
-          rm -rf "$STAGING_DIR"
-        shell: bash
-
-      - name: Create unified dependencies package
-        run: |
-          echo "Creating unified dependencies package..."
-          
-          # Create a directory to store all dependency packages
-          DEPS_DIR="build/dependencies"
-          mkdir -p "$DEPS_DIR"
-          
-          # Move all dependency packages to the dependencies directory
-          mv build/fluent-bit-libyaml-*-apple.pkg "$DEPS_DIR/"
-          mv build/fluent-bit-openssl-*-apple.pkg "$DEPS_DIR/"
-          mv build/fluent-bit-bison-*-apple.pkg "$DEPS_DIR/"
-          mv build/fluent-bit-flex-*-apple.pkg "$DEPS_DIR/"
-          mv build/fluent-bit-pkgconfig-*-apple.pkg "$DEPS_DIR/"
-          
-          # Get version from main package name
           VERSION=${{ needs.sync.outputs.latest_tag }}
-          echo "Detected version: $VERSION"
           
-          # Create an installation script in the dependencies directory
-          echo '#!/bin/bash' > "$DEPS_DIR/install_dependencies.sh"
-          echo '# Fluent Bit Dependencies Installation Script' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'set -e' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '# Find the directory where this script is located' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "Installing dependencies from: $SCRIPT_DIR"' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '# Install all dependencies in the correct order' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "Installing libyaml dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-libyaml-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "Installing OpenSSL dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-openssl-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "Installing bison dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-bison-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "Installing flex dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-flex-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "Installing pkg-config dependency..."' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'sudo installer -pkg "$SCRIPT_DIR"/fluent-bit-pkgconfig-*-apple.pkg -target /' >> "$DEPS_DIR/install_dependencies.sh"
-          echo '' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "All dependencies successfully installed."' >> "$DEPS_DIR/install_dependencies.sh"
-          echo 'echo "You can now install the main Fluent Bit package."' >> "$DEPS_DIR/install_dependencies.sh"
-
-          # Make the installation script executable
-          chmod +x "$DEPS_DIR/install_dependencies.sh"
+          # Create package structure
+          mkdir -p pkg_root/Library/Management/fluent-bit/bin
+          mkdir -p pkg_root/Library/Management/fluent-bit/Frameworks
           
-          # Create a README file explaining the installation process
-          echo '# Fluent Bit macOS Dependencies' > "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo 'This directory contains all the dependencies required by Fluent Bit on macOS.' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo '## Quick Installation' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo 'To install all dependencies at once, run:' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo '```bash' >> "$DEPS_DIR/README.md"
-          echo '# Make the script executable (if needed)' >> "$DEPS_DIR/README.md"
-          echo 'chmod +x install_dependencies.sh' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo '# Run the installation script' >> "$DEPS_DIR/README.md"
-          echo './install_dependencies.sh' >> "$DEPS_DIR/README.md"
-          echo '```' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo '## Manual Installation' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo 'If you prefer to install dependencies manually, install them in this order:' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo '1. `fluent-bit-libyaml-*-apple.pkg` - YAML parsing library' >> "$DEPS_DIR/README.md"
-          echo '2. `fluent-bit-openssl-*-apple.pkg` - OpenSSL libraries' >> "$DEPS_DIR/README.md"
-          echo '3. `fluent-bit-bison-*-apple.pkg` - GNU Bison parser generator' >> "$DEPS_DIR/README.md"
-          echo '4. `fluent-bit-flex-*-apple.pkg` - Fast lexical analyzer' >> "$DEPS_DIR/README.md"
-          echo '5. `fluent-bit-pkgconfig-*-apple.pkg` - Package configuration tool' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo 'For example:' >> "$DEPS_DIR/README.md"
-          echo '```bash' >> "$DEPS_DIR/README.md"
-          echo 'sudo installer -pkg fluent-bit-libyaml-*-apple.pkg -target /' >> "$DEPS_DIR/README.md"
-          echo '```' >> "$DEPS_DIR/README.md"
-          echo '' >> "$DEPS_DIR/README.md"
-          echo 'After installing all dependencies, install the main Fluent Bit package.' >> "$DEPS_DIR/README.md"
+          # Find and copy the binary
+          FLUENT_BIT_BIN=$(find build/ -type f -name 'fluent-bit' | grep -v '\.dSYM')
+          cp "$FLUENT_BIT_BIN" pkg_root/Library/Management/fluent-bit/bin/
           
-          # Create the archive
-          cd build
-          DEPS_ARCHIVE="fluent-bit-dependencies-${VERSION}-macos.tar.gz"
-          tar -czf "$DEPS_ARCHIVE" dependencies
-          echo "Created dependencies archive: $DEPS_ARCHIVE"
-        shell: bash
-
-      - name: Build pkg with cpack
-        run: cpack -G productbuild
-        working-directory: build
+          # Copy the Frameworks directory with all dependencies
+          BINARY_DIR=$(dirname "$FLUENT_BIT_BIN")
+          if [ -d "$BINARY_DIR/../Frameworks" ]; then
+              cp -R "$BINARY_DIR/../Frameworks/"* pkg_root/Library/Management/fluent-bit/Frameworks/ || true
+          fi
+          
+          # Build the package - no scripts, no configs, just the binary and libs
+          pkgbuild --root pkg_root \
+                   --identifier com.fluent-bit.pkg \
+                   --version "$VERSION" \
+                   --install-location / \
+                   "fluent-bit-${VERSION}-apple.pkg"
+          
+          # List what's in the package for verification
+          echo "Package contents:"
+          pkgutil --payload-files "fluent-bit-${VERSION}-apple.pkg"
+          
+          # Check file size
+          echo "Package size:"
+          ls -lh "fluent-bit-${VERSION}-apple.pkg"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            build/fluent-bit-*-apple.pkg
-            build/fluent-bit-dependencies-*-macos.tar.gz
+          files: fluent-bit-*-apple.pkg
           tag_name: ${{ needs.sync.outputs.latest_tag }}
           body: |
             ## Fluent Bit Release ${{ needs.sync.outputs.latest_tag }}
             
-            This release includes the following packages:
+            Self-contained Fluent Bit package for macOS.
             
-            ### 1. Main Application Package:
-            - **fluent-bit-*-apple.pkg** - Main Fluent Bit package
+            ### Installation
+            sudo installer -pkg fluent-bit-${{ needs.sync.outputs.latest_tag }}-apple.pkg -target /
+            ### Usage
+            # Check version
+            /Library/Management/fluent-bit/bin/fluent-bit --version
             
-            ### 2. Dependencies Archive:
-            - **fluent-bit-dependencies-*-macos.tar.gz** - All required dependencies bundled together
-            
-            ## Installation Instructions
-            
-            ### Option 1: Using the Dependencies Archive (Recommended)
-            
-            ```bash
-            # 1. Download and extract the dependencies archive
-            tar -xzf fluent-bit-dependencies-*-macos.tar.gz
-            
-            # 2. Install all dependencies at once
-            cd dependencies
-            ./install_dependencies.sh
-            
-            # 3. Install the main Fluent Bit package
-            sudo installer -pkg /path/to/fluent-bit-*-apple.pkg -target /
-            ```
-            
-            ### Option 2: Manual Installation
-            
-            If you prefer to install packages individually, install them in this order:
-            
-            ```bash
-            # Extract dependencies archive first
-            tar -xzf fluent-bit-dependencies-*-macos.tar.gz
-            
-            # Install dependencies one by one
-            sudo installer -pkg dependencies/fluent-bit-libyaml-*-apple.pkg -target /
-            sudo installer -pkg dependencies/fluent-bit-openssl-*-apple.pkg -target /
-            sudo installer -pkg dependencies/fluent-bit-bison-*-apple.pkg -target /
-            sudo installer -pkg dependencies/fluent-bit-flex-*-apple.pkg -target /
-            sudo installer -pkg dependencies/fluent-bit-pkgconfig-*-apple.pkg -target /
-            
-            # Install main package
-            sudo installer -pkg fluent-bit-*-apple.pkg -target /
-            ```
-            
-            All components are installed to `/Library/Management/fluent-bit/` with libraries in the Frameworks subdirectory and executables in the bin subdirectory.
+            # Run with your config
+            /Library/Management/fluent-bit/bin/fluent-bit -c /path/to/your/config.conf
+            ### Uninstall
+            sudo rm -rf /Library/Management/fluent-bit
