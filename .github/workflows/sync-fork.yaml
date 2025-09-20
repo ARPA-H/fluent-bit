@@ -122,7 +122,7 @@ jobs:
         run: |
           export LIBRARY_PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$LIBRARY_PATH
           export HOMEBREW_DEPENDENCIES="libyaml openssl bison flex pkgconfig"
-          cmake -DCMAKE_INSTALL_PREFIX=/Library/Management/fluent-bit -DCPACK_GENERATOR=productbuild -DFLB_NIGHTLY_BUILD=false ../ -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
+          cmake -DCMAKE_INSTALL_PREFIX=/Library/Management/fluent-bit -DCPACK_GENERATOR=productbuild ../ -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
           cmake --build .
         working-directory: build
 
