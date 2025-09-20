@@ -191,15 +191,23 @@ jobs:
                               fi
                           fi
                       done
+
+                      cosdesign --force --sign - "$FRAMEWORKS_DIR/$base"
                   else
                       echo "Warning: $base was not copied to Frameworks directory, skipping install_name_tool updates"
                   fi
               fi
           done
-        
+
+          codesign --force --sign - "$FLUENT_BIT_BIN" 
+
           # Verify the changes
           echo "After patching, new dependencies:"
           otool -L "$FLUENT_BIT_BIN" | grep @executable_path
+
+          # Verify code signing
+          echo "Verifying code signature:"
+          codesign -v "$FLUENT_BIT_BIN" || echo "Note: Binary is ad-hoc signed"
         
           # List what's actually in the Frameworks directory
           echo "Contents of Frameworks directory:"
