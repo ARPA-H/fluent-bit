@@ -23,6 +23,7 @@
 #include <fluent-bit/flb_time.h>
 #include <fluent-bit/flb_log_event.h>
 #include <fluent-bit/flb_log_event_decoder.h>
+#include <fluent-bit/flb_sds.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -85,6 +86,35 @@ static int get_output_num()
     return ret;
 }
 
+void wait_for_output_num(uint32_t timeout_ms, int *output_num)
+{
+    struct flb_time start_time;
+    struct flb_time end_time;
+    struct flb_time diff_time;
+    uint64_t elapsed_time_flb = 0;
+
+    flb_time_get(&start_time);
+
+    while (true) {
+        *output_num = get_output_num();
+
+        if (*output_num > 0) {
+            break;
+        }
+
+        flb_time_msleep(100);
+        flb_time_get(&end_time);
+        flb_time_diff(&end_time, &start_time, &diff_time);
+        elapsed_time_flb = flb_time_to_nanosec(&diff_time) / 1000000;
+
+        if (elapsed_time_flb > timeout_ms) {
+            flb_warn("[timeout] elapsed_time: %ld", elapsed_time_flb);
+            /* Reached timeout. */
+            break;
+        }
+    }
+}
+
 static int cb_count_msgpack_events(void *record, size_t size, void *data)
 {
     msgpack_unpacked result;
@@ -133,7 +163,8 @@ int callback_cat(void* data, size_t size, void* cb_data)
 static char *get_group_metadata(void *chunk, size_t size)
 {
     int ret;
-    char *json;
+    flb_sds_t out_buf;
+    size_t out_size = 1024;
     struct flb_log_event log_event;
     struct flb_log_event_decoder log_decoder;
 
@@ -147,15 +178,29 @@ static char *get_group_metadata(void *chunk, size_t size)
         return NULL;
     }
 
-    json = flb_msgpack_to_json_str(1024, log_event.metadata);
+    /* get metadata entry in JSON */
+    out_buf = flb_sds_create_size(out_size);
+    if (!out_buf) {
+        flb_error("failed to allocate out_buf");
+        return NULL;
+    }
+
+    ret = flb_msgpack_to_json(out_buf, out_size, log_event.metadata, FLB_TRUE);
+    if (ret < 0) {
+        flb_sds_destroy(out_buf);
+        flb_log_event_decoder_destroy(&log_decoder);
+        return NULL;
+    }
+
     flb_log_event_decoder_destroy(&log_decoder);
-    return json;
+    return out_buf;
 }
 
 static char *get_group_body(void *chunk, size_t size)
 {
     int ret;
-    char *json;
+    flb_sds_t out_buf;
+    size_t out_size = 1024;
     struct flb_log_event log_event;
     struct flb_log_event_decoder log_decoder;
 
@@ -169,33 +214,87 @@ static char *get_group_body(void *chunk, size_t size)
         return NULL;
     }
 
-    json = flb_msgpack_to_json_str(1024, log_event.body);
+    /* get metadata entry in JSON */
+    out_buf = flb_sds_create_size(out_size);
+    if (!out_buf) {
+        flb_error("failed to allocate out_buf");
+        return NULL;
+    }
+
+    ret = flb_msgpack_to_json(out_buf, out_size, log_event.body, FLB_TRUE);
+    if (ret < 0) {
+        flb_sds_destroy(out_buf);
+        flb_log_event_decoder_destroy(&log_decoder);
+        return NULL;
+    }
+
     flb_log_event_decoder_destroy(&log_decoder);
-    return json;
+    return out_buf;
 }
 
 static char *get_log_body(void *chunk, size_t size)
 {
     int ret;
-    char *json;
+    flb_sds_t out_buf;
+    size_t out_size = 1024;
     struct flb_log_event log_event;
     struct flb_log_event_decoder log_decoder;
 
     ret = flb_log_event_decoder_init(&log_decoder, chunk, size);
     TEST_CHECK(ret == FLB_EVENT_DECODER_SUCCESS);
 
-    flb_log_event_decoder_read_groups(&log_decoder, FLB_TRUE);
-
-    /* 0: group header */
     flb_log_event_decoder_next(&log_decoder, &log_event);
 
-    /* 1: record */
-    flb_log_event_decoder_next(&log_decoder, &log_event);
+    /* get metadata entry in JSON */
+    out_buf = flb_sds_create_size(out_size);
+    if (!out_buf) {
+        flb_error("failed to allocate out_buf");
+        return NULL;
+    }
 
-    json = flb_msgpack_to_json_str(1024, log_event.body);
+    ret = flb_msgpack_to_json(out_buf, out_size, log_event.body, FLB_TRUE);
+    if (ret < 0) {
+        flb_sds_destroy(out_buf);
+        flb_log_event_decoder_destroy(&log_decoder);
+        return NULL;
+    }
 
     flb_log_event_decoder_destroy(&log_decoder);
-    return json;
+    return out_buf;
+}
+
+static char *get_record_metadata(void *chunk, size_t size)
+{
+    int ret;
+    size_t out_size = 1024;
+    flb_sds_t out_buf;
+    struct flb_log_event log_event;
+    struct flb_log_event_decoder log_decoder;
+
+    ret = flb_log_event_decoder_init(&log_decoder, chunk, size);
+    TEST_CHECK(ret == FLB_EVENT_DECODER_SUCCESS);
+
+    ret = flb_log_event_decoder_next(&log_decoder, &log_event);
+    if (ret != FLB_EVENT_DECODER_SUCCESS) {
+        return NULL;
+    }
+
+    /* get metadata entry in JSON */
+    out_buf = flb_sds_create_size(out_size);
+    if (!out_buf) {
+        flb_error("failed to allocate out_buf");
+        return NULL;
+    }
+
+    ret = flb_msgpack_to_json(out_buf, out_size, log_event.metadata, FLB_TRUE);
+    if (ret < 0) {
+        flb_sds_destroy(out_buf);
+        flb_log_event_decoder_destroy(&log_decoder);
+        return NULL;
+    }
+
+    flb_log_event_decoder_destroy(&log_decoder);
+    return out_buf;
 }
 
 void delete_script()
@@ -203,6 +302,10 @@ void delete_script()
     unlink(TMP_LUA_PATH);
     flb_debug("remove script\n");
 }
+
+/* callback used by flb_test_five_args */
+static int cb_check_metadata_modified(void *chunk, size_t size, void *data);
+static int cb_check_metadata_array(void *chunk, size_t size, void *data);
 
 
 int create_script(char *script_body, size_t body_size)
@@ -974,7 +1077,7 @@ void flb_test_empty_array(void)
     flb_sds_destroy(outbuf);
 }
 
-void flb_test_invalid_metatable(void)
+void flb_test_invalid_metatable()
 {
     int ret;
     flb_ctx_t *ctx;
@@ -1048,6 +1151,119 @@ void flb_test_invalid_metatable(void)
     flb_destroy(ctx);
 }
 
+void flb_test_metadata_single_record()
+{
+    int ret;
+    int num;
+    flb_ctx_t *ctx;
+    int in_ffd;
+    int out_ffd;
+    int filter_ffd;
+    struct flb_lib_out_cb cb_data;
+
+    const char *script = "function lua_main(tag, ts, group, metadata, record)\n"\
+                        "  metadata['stream'] = 'custom'\n"\
+                        "  record['extra'] = 'yes'\n"\
+                        "  return 1, ts, metadata, record\n"\
+                        "end";
+
+    clear_output_num();
+
+    cb_data.cb = cb_check_metadata_modified;
+    cb_data.data = NULL;
+
+    ctx = flb_create();
+    flb_service_set(ctx, "flush", FLUSH_INTERVAL, "grace", "1", NULL);
+
+    filter_ffd = flb_filter(ctx, (char *)"lua", NULL);
+    TEST_CHECK(filter_ffd >= 0);
+    flb_filter_set(ctx, filter_ffd,
+                   "Match", "*",
+                   "call", "lua_main",
+                   "code", script,
+                   NULL);
+
+    in_ffd = flb_input(ctx, (char *)"dummy", NULL);
+    TEST_CHECK(in_ffd >= 0);
+    flb_input_set(ctx, in_ffd, "tag", "test", NULL);
+    flb_input_set(ctx, in_ffd, "dummy", "{\"msg\":\"hi\"}", NULL);
+    flb_input_set(ctx, in_ffd, "metadata", "{\"stream\":\"orig\"}", NULL);
+
+    out_ffd = flb_output(ctx, (char *)"lib", (void *)&cb_data);
+    TEST_CHECK(out_ffd >= 0);
+    flb_output_set(ctx, out_ffd,
+                   "match", "*",
+                   "data_mode", "chunk",
+                   NULL);
+
+    ret = flb_start(ctx);
+    TEST_CHECK(ret == 0);
+
+    /* waiting to flush */
+    wait_for_output_num(3000, &num);
+    if (!TEST_CHECK(num > 0))  {
+        TEST_MSG("no outputs");
+    }
+
+    flb_stop(ctx);
+    flb_destroy(ctx);
+}
+
+void flb_test_metadata_array(void)
+{
+    int ret;
+    int num;
+    flb_ctx_t *ctx;
+    int in_ffd;
+    int out_ffd;
+    int filter_ffd;
+    struct flb_lib_out_cb cb_data;
+
+    const char *script = "function lua_main(tag, ts, group, metadata, record)\n"\
+                        "  return 1, ts, { {stream='one'}, {stream='two'} }, { {msg='a'}, {msg='b'} }\n"\
+                        "end";
+
+    clear_output_num();
+
+    cb_data.cb = cb_check_metadata_array;
+    cb_data.data = NULL;
+
+    ctx = flb_create();
+    flb_service_set(ctx, "flush", FLUSH_INTERVAL, "grace", "1", NULL);
+
+    filter_ffd = flb_filter(ctx, (char *)"lua", NULL);
+    TEST_CHECK(filter_ffd >= 0);
+    flb_filter_set(ctx, filter_ffd,
+                   "Match", "*",
+                   "call", "lua_main",
+                   "code", script,
+                   NULL);
+
+    in_ffd = flb_input(ctx, (char *)"dummy", NULL);
+    TEST_CHECK(in_ffd >= 0);
+    flb_input_set(ctx, in_ffd, "tag", "test", NULL);
+    flb_input_set(ctx, in_ffd, "dummy", "{\"foo\":\"bar\"}", NULL);
+
+    out_ffd = flb_output(ctx, (char *)"lib", (void *)&cb_data);
+    TEST_CHECK(out_ffd >= 0);
+    flb_output_set(ctx, out_ffd,
+                   "match", "*",
+                   "data_mode", "chunk",
+                   NULL);
+
+    ret = flb_start(ctx);
+    TEST_CHECK(ret == 0);
+
+    /* waiting to flush */
+    wait_for_output_num(3000, &num);
+    if (!TEST_CHECK(num == 2))  {
+        TEST_MSG("no intended outputs. Expected 2 actual %d", num);
+    }
+
+    flb_stop(ctx);
+    flb_destroy(ctx);
+}
+
 /* validate group handling with processors and Lua filter */
 static int cb_check_group(void *chunk, size_t size, void *data)
 {
@@ -1055,10 +1271,11 @@ static int cb_check_group(void *chunk, size_t size, void *data)
     char *json;
 
     json = get_group_metadata(chunk, size);
+
     TEST_CHECK(json != NULL);
     if (json) {
         TEST_CHECK(strcmp(json, "{\"schema\":\"otlp\",\"resource_id\":0,\"scope_id\":0}") == 0);
-        flb_free(json);
+        flb_sds_destroy(json);
     }
 
     json = get_group_body(chunk, size);
@@ -1066,7 +1283,7 @@ static int cb_check_group(void *chunk, size_t size, void *data)
     if (json) {
         TEST_CHECK(strstr(json, "\"my_res_attr\":\"my_value\"") != NULL);
         TEST_CHECK(strstr(json, "\"my_scope_attr\":\"my_value\"") != NULL);
-        flb_free(json);
+        flb_sds_destroy(json);
     }
 
     json = get_log_body(chunk, size);
@@ -1074,7 +1291,7 @@ static int cb_check_group(void *chunk, size_t size, void *data)
     if (json) {
         TEST_CHECK(strstr(json, "Hello, Fluent Bit!") != NULL);
         TEST_CHECK(strstr(json, "This is a new field from Lua") != NULL);
-        flb_free(json);
+        flb_sds_destroy(json);
     }
 
     set_output_num(num + 1);
@@ -1091,7 +1308,7 @@ static int cb_check_group_no_modified(void *chunk, size_t size, void *data)
     TEST_CHECK(json != NULL);
     if (json) {
         TEST_CHECK(strcmp(json, "{\"schema\":\"otlp\",\"resource_id\":0,\"scope_id\":0}") == 0);
-        flb_free(json);
+        flb_sds_destroy(json);
     }
 
     json = get_group_body(chunk, size);
@@ -1099,17 +1316,77 @@ static int cb_check_group_no_modified(void *chunk, size_t size, void *data)
     if (json) {
         TEST_CHECK(strstr(json, "\"my_res_attr\":\"my_value\"") != NULL);
         TEST_CHECK(strstr(json, "\"my_scope_attr\":\"my_value\"") != NULL);
-        flb_free(json);
+        flb_sds_destroy(json);
     }
 
     json = get_log_body(chunk, size);
     TEST_CHECK(json != NULL);
     if (json) {
         TEST_CHECK(strstr(json, "Hello, Fluent Bit!") != NULL);
-        flb_free(json);
+        flb_sds_destroy(json);
     }
 
     set_output_num(num + 1);
+    return 0;
+}
+
+static int cb_check_metadata_modified(void *chunk, size_t size, void *data)
+{
+    int num = get_output_num();
+    char *json;
+
+    json = get_record_metadata(chunk, size);
+    TEST_CHECK(json != NULL);
+    if (json) {
+        TEST_CHECK(strstr(json, "\"stream\":\"custom\"") != NULL);
+        flb_sds_destroy(json);
+    }
+
+    json = get_log_body(chunk, size);
+    TEST_CHECK(json != NULL);
+    if (json) {
+        TEST_CHECK(strstr(json, "\"extra\":\"yes\"") != NULL);
+        flb_sds_destroy(json);
+    }
+
+    set_output_num(num + 1);
+    return 0;
+}
+
+static int cb_check_metadata_array(void *chunk, size_t size, void *data)
+{
+    int num = get_output_num();
+    int idx = 0;
+    struct flb_log_event log_event;
+    struct flb_log_event_decoder dec;
+    int ret;
+
+    ret = flb_log_event_decoder_init(&dec, chunk, size);
+    TEST_CHECK(ret == FLB_EVENT_DECODER_SUCCESS);
+
+    while ((ret = flb_log_event_decoder_next(&dec, &log_event)) == FLB_EVENT_DECODER_SUCCESS) {
+        char *meta = flb_msgpack_to_json_str(256, log_event.metadata, FLB_TRUE);
+        char *body = flb_msgpack_to_json_str(256, log_event.body, FLB_TRUE);
+
+        TEST_CHECK(meta != NULL && body != NULL);
+        if (meta && body) {
+            if (idx == 0) {
+                TEST_CHECK(strstr(meta, "\"stream\":\"one\"") != NULL);
+                TEST_CHECK(strstr(body, "\"msg\":\"a\"") != NULL);
+            }
+            else if (idx == 1) {
+                TEST_CHECK(strstr(meta, "\"stream\":\"two\"") != NULL);
+                TEST_CHECK(strstr(body, "\"msg\":\"b\"") != NULL);
+            }
+            flb_free(meta);
+            flb_free(body);
+        }
+        idx++;
+    }
+
+    flb_log_event_decoder_destroy(&dec);
+    set_output_num(num + idx);
+
     return 0;
 }
 
@@ -1347,6 +1624,8 @@ TEST_LIST = {
     {"split_record", flb_test_split_record},
     {"empty_array", flb_test_empty_array},
     {"invalid_metatable", flb_test_invalid_metatable},
+    {"metadata_single_record", flb_test_metadata_single_record},
+    {"metadata_array", flb_test_metadata_array},
     {"group_lua_processor_modified", flb_test_group_lua_processor_modified},
     {"group_lua_processor_no_modified", flb_test_group_lua_processor_no_modified},
     {"group_lua_drop", flb_test_group_lua_drop},

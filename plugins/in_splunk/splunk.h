@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include <fluent-bit/flb_input.h>
 #include <fluent-bit/flb_utils.h>
 #include <fluent-bit/flb_log_event_encoder.h>
+#include <fluent-bit/flb_record_accessor.h>
 
 #include <monkey/monkey.h>
 #include <fluent-bit/http_server/flb_http_server.h>
@@ -41,7 +42,8 @@ struct flb_splunk_tokens {
 struct flb_splunk {
     flb_sds_t listen;
     flb_sds_t tcp_port;
-    const char *tag_key;
+    flb_sds_t tag_key;
+    struct flb_record_accessor *ra_tag_key;
 
     /* Success HTTP headers */
     struct mk_list *success_headers;
@@ -52,6 +54,8 @@ struct flb_splunk {
     size_t ingested_auth_header_len;
     int store_token_in_metadata;
     flb_sds_t store_token_key;
+    int add_remote_addr;
+    flb_sds_t remote_addr_key;
 
     struct flb_log_event_encoder log_encoder;
 

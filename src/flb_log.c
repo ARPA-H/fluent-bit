@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_worker.h>
 #include <fluent-bit/flb_mem.h>
+#include <fluent-bit/flb_time.h>
 #include <cmetrics/cmetrics.h>
 #include <cmetrics/cmt_counter.h>
 
@@ -536,7 +537,7 @@ struct flb_log_metrics *flb_log_metrics_create()
         ret = cmt_counter_set(metrics->logs_total_counter,
                               ts,
                               0,
-                              1, (char *[]) {message_type_str});
+                              1, (char *[]) {(char *) message_type_str});
         if (ret == -1) {
             flb_log_metrics_destroy(metrics);
             return NULL;
@@ -673,13 +674,13 @@ int flb_log_construct(struct log_message *msg, int *ret_len,
     int ret;
     int len;
     int total;
-    time_t now;
     const char *header_color = NULL;
     const char *header_title;
     const char *bold_color = ANSI_BOLD;
     const char *reset_color = ANSI_RESET;
     struct tm result;
     struct tm *current;
+    struct flb_time now;
 
     switch (type) {
     case FLB_LOG_HELP:
@@ -718,8 +719,8 @@ int flb_log_construct(struct log_message *msg, int *ret_len,
     }
     #endif // FLB_LOG_NO_CONTROL_CHARS
 
-    now = time(NULL);
-    current = localtime_r(&now, &result);
+    flb_time_get(&now);
+    current = localtime_r(&now.tm.tv_sec, &result);
 
     if (current == NULL) {
         return -1;
@@ -727,7 +728,7 @@ int flb_log_construct(struct log_message *msg, int *ret_len,
 
     header_title = flb_log_message_type_str(type);
     len = snprintf(msg->msg, sizeof(msg->msg) - 1,
-                   "%s[%s%i/%02i/%02i %02i:%02i:%02i%s]%s [%s%5s%s] ",
+                   "%s[%s%i/%02i/%02i %02i:%02i:%02i.%03ld%s]%s [%s%5s%s] ",
                    /*      time     */                    /* type */
 
                    /* time variables */
@@ -738,6 +739,7 @@ int flb_log_construct(struct log_message *msg, int *ret_len,
                    current->tm_hour,
                    current->tm_min,
                    current->tm_sec,
+                   now.tm.tv_nsec,
                    bold_color, reset_color,
 
                    /* type format */
@@ -826,7 +828,7 @@ void flb_log_print(int type, const char *file, int line, const char *fmt, ...)
             ts = cfl_time_now();
             ret = cmt_counter_inc(config->log->metrics->logs_total_counter,
                                   ts,
-                                  1, (char *[]) {msg_type_str});
+                                  1, (char *[]) {(char *) msg_type_str});
             if (ret == -1) {
                 /* Not using flb_log_debug to avoid recursing into this same function. */
                 fprintf(stderr,

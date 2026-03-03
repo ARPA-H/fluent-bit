@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -562,9 +562,8 @@ int flb_gzip_uncompress_multi(void *in_data, size_t in_len,
         if (status == MZ_OK) {
             /* Out of space in our buffer. Create a new one. */
             buffer_lengths[buffer_index] = FLB_GZIP_BUFFER_SIZE - stream.avail_out;
-            buffer_index++;
 
-            if (buffer_index >= FLB_GZIP_MAX_BUFFERS) {
+            if (buffer_index >= FLB_GZIP_MAX_BUFFERS - 1) {
                 flb_error("[gzip] maximum decompression size reached (~100 MB)");
 
                 mz_inflateEnd(&stream);
@@ -574,6 +573,8 @@ int flb_gzip_uncompress_multi(void *in_data, size_t in_len,
                 return -1;
             }
 
+            /* Process to increment buffer index for valid conditions */
+            buffer_index++;
             buffers[buffer_index] = flb_malloc(FLB_GZIP_BUFFER_SIZE);
 
             if (!buffers[buffer_index]) {
@@ -689,9 +690,11 @@ static int flb_gzip_decompressor_process_header(
 
     /* Minimal length: header + crc32 */
     if (context->input_buffer_length < FLB_GZIP_HEADER_SIZE) {
-        flb_error("[gzip] unexpected content length");
-
-        return FLB_DECOMPRESSOR_FAILURE;
+        /*
+         * This is not a fatal error; it's the expected condition when waiting
+         * for more data. Return INSUFFICIENT_DATA without logging an error.
+         */
+        return FLB_DECOMPRESSOR_INSUFFICIENT_DATA;
     }
 
     memcpy(&inner_context->gzip_header,

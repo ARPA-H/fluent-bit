@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -68,7 +68,8 @@ static int azure_blob_format(struct flb_config *config,
     out_buf = flb_pack_msgpack_to_json_format(data, bytes,
                                               FLB_PACK_JSON_FORMAT_LINES,
                                               FLB_PACK_JSON_DATE_ISO8601,
-                                              ctx->date_key);
+                                              ctx->date_key,
+                                              config->json_escape_unicode);
     if (!out_buf) {
         return -1;
     }

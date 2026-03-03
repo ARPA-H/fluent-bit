@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -78,9 +78,6 @@ struct flb_metrics *flb_metrics_create(const char *title)
 {
     int ret;
     struct flb_metrics *metrics;
-    size_t title_len = 0;
-    char *allocated_title = NULL;
-    size_t threshold = FLB_METRIC_LENGTH_LIMIT;
 
     /* Create a metrics parent context */
     metrics = flb_calloc(1, sizeof(struct flb_metrics));
@@ -104,7 +101,6 @@ struct flb_metrics *flb_metrics_create(const char *title)
 
 int flb_metrics_title(const char *title, struct flb_metrics *metrics)
 {
-    int ret;
     int len;
 
     len  = strlen(title);
@@ -128,7 +124,6 @@ int flb_metrics_title(const char *title, struct flb_metrics *metrics)
 
 int flb_metrics_add(int id, const char *title, struct flb_metrics *metrics)
 {
-    int ret;
     int len;
     struct flb_metric *m;
     size_t threshold = FLB_METRIC_LENGTH_LIMIT;
@@ -375,4 +370,13 @@ int flb_metrics_fluentbit_add(struct flb_config *ctx, struct cmt *cmt)
     attach_hot_reload_info(ctx, cmt, ts, hostname);
 
     return 0;
+}
+
+bool flb_metrics_is_empty(struct cmt *cmt)
+{
+    return cfl_list_is_empty(&cmt->counters) &&
+           cfl_list_is_empty(&cmt->gauges) &&
+           cfl_list_is_empty(&cmt->histograms) &&
+           cfl_list_is_empty(&cmt->summaries) &&
+           cfl_list_is_empty(&cmt->untypeds);
 }

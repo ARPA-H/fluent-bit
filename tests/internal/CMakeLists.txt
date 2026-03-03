@@ -10,8 +10,10 @@ set(UNIT_TESTS_FILES
   hmac.c
   crypto.c
   hash.c
+  kv.c
   slist.c
   router.c
+  router_config.c
   network.c
   unit_sizes.c
   hashtable.c
@@ -22,7 +24,9 @@ set(UNIT_TESTS_FILES
   random.c
   config_map.c
   mp.c
+  mp_chunk_cobj.c
   input_chunk.c
+  input_chunk_routes.c
   flb_time.c
   file.c
   csv.c
@@ -50,7 +54,20 @@ set(UNIT_TESTS_FILES
   task_map.c
   strptime.c
   storage_inherit.c
+  unicode.c
+  opentelemetry.c
+  storage_dlq.c
 )
+
+# TLS helpers
+if(FLB_TLS)
+  set(UNIT_TESTS_FILES
+    ${UNIT_TESTS_FILES}
+    upstream_tls.c
+    oauth2_jwt.c
+    oauth2.c
+    )
+endif()
 
 # Config format
 set(UNIT_TESTS_FILES
@@ -123,6 +140,7 @@ if(FLB_AWS)
     ${UNIT_TESTS_FILES}
     aws_util.c
     aws_compress.c
+    aws_aggregation.c
     aws_credentials.c
     aws_credentials_ec2.c
     aws_credentials_sts.c
@@ -151,6 +169,13 @@ if(FLB_LUAJIT)
     )
 endif()
 
+if(FLB_RIPSER)
+  set(UNIT_TESTS_FILES
+    ${UNIT_TESTS_FILES}
+    ripser.c
+    )
+endif()
+
 set(UNIT_TESTS_DATA
   data/tls/certificate.pem
   data/tls/private_key.pem
@@ -160,6 +185,8 @@ set(UNIT_TESTS_DATA
   data/parser/regex.conf
   data/input_chunk/log/a_thousand_plus_one_bytes.log
   data/input_chunk/log/test_buffer_valid.log
+  data/opentelemetry/logs.json
+  data/opentelemetry/metrics.json
   )
 
 set(FLB_TESTS_DATA_PATH ${CMAKE_CURRENT_SOURCE_DIR}/)

@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -153,7 +153,7 @@ static void cb_mq_metrics(mk_mq_t *queue, void *data, size_t size)
     }
 
     /* Convert msgpack to JSON */
-    out_data = flb_msgpack_raw_to_json_sds(data, size);
+    out_data = flb_msgpack_raw_to_json_sds(data, size, FLB_TRUE);
     if (!out_data) {
         return;
     }

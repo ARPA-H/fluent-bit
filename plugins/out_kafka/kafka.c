@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@
 #include <fluent-bit/flb_pack.h>
 #include <fluent-bit/flb_utils.h>
 #include <fluent-bit/flb_log_event_decoder.h>
+#include <fluent-bit/aws/flb_aws_msk_iam.h>
+#include <fluent-bit/flb_kafka.h>
 
 #include "kafka_config.h"
 #include "kafka_topic.h"
@@ -29,7 +31,8 @@
 void cb_kafka_msg(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage,
                   void *opaque)
 {
-    struct flb_out_kafka *ctx = (struct flb_out_kafka *) opaque;
+    struct flb_kafka_opaque *op = (struct flb_kafka_opaque *) opaque;
+    struct flb_out_kafka *ctx = op ? (struct flb_out_kafka *) op->ptr : NULL;
 
     if (rkmessage->err) {
         flb_plg_warn(ctx->ins, "message delivery failed: %s",
@@ -45,9 +48,11 @@ void cb_kafka_msg(rd_kafka_t *rk, const rd_kafka_message_t *rkmessage,
 void cb_kafka_logger(const rd_kafka_t *rk, int level,
                      const char *fac, const char *buf)
 {
+    struct flb_kafka_opaque *op;
     struct flb_out_kafka *ctx;
 
-    ctx = (struct flb_out_kafka *) rd_kafka_opaque(rk);
+    op = (struct flb_kafka_opaque *) rd_kafka_opaque(rk);
+    ctx = op ? (struct flb_out_kafka *) op->ptr : NULL;
 
     if (level <= FLB_KAFKA_LOG_ERR) {
         flb_plg_error(ctx->ins, "%s: %s",
@@ -279,7 +284,8 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
     }
 
     if (ctx->format == FLB_KAFKA_FMT_JSON) {
-        s = flb_msgpack_raw_to_json_sds(mp_sbuf.data, mp_sbuf.size);
+        s = flb_msgpack_raw_to_json_sds(mp_sbuf.data, mp_sbuf.size,
+                                        config->json_escape_unicode);
         if (!s) {
             flb_plg_error(ctx->ins, "error encoding to JSON");
             msgpack_sbuffer_destroy(&mp_sbuf);
@@ -671,6 +677,20 @@ static struct flb_config_map config_map[] = {
     "If you specify a key name with this option, then only the value of "
     "that key will be sent to Kafka."
    },
+
+#ifdef FLB_HAVE_AWS_MSK_IAM
+   {
+    FLB_CONFIG_MAP_STR, "aws_msk_iam_cluster_arn", NULL,
+    0, FLB_TRUE, offsetof(struct flb_out_kafka, aws_msk_iam_cluster_arn),
+    "ARN of the MSK cluster when using AWS IAM authentication"
+   },
+   {
+    FLB_CONFIG_MAP_BOOL, "aws_msk_iam", "false",
+    0, FLB_TRUE, offsetof(struct flb_out_kafka, aws_msk_iam),
+    "Enable AWS MSK IAM authentication"
+   },
+#endif
+
    /* EOF */
    {0}
 };

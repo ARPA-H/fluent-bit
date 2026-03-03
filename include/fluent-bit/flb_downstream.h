@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -45,6 +45,9 @@ struct flb_downstream {
 
     /* this is a config map reference coming from the plugin net_setup field */
     struct flb_net_setup  *net_setup;
+
+    /* pause state */
+    int paused;
 };
 
 static inline int flb_downstream_is_shutting_down(struct flb_downstream *downstream)
@@ -75,6 +78,9 @@ int flb_downstream_set_property(struct flb_config *config,
                               struct flb_net_setup *net, char *k, char *v);
 
 struct flb_connection *flb_downstream_conn_get(struct flb_downstream *stream);
+
+void flb_downstream_pause(struct flb_downstream *stream);
+void flb_downstream_resume(struct flb_downstream *stream);
 
 int flb_downstream_conn_release(struct flb_connection *connection);
 

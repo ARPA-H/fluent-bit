@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
  */
 
 #include <fluent-bit/flb_input_plugin.h>
+#include <fluent-bit/flb_oauth2_jwt.h>
 
 #include "http.h"
 #include "http_config.h"
@@ -42,11 +43,23 @@ struct flb_http *http_config_create(struct flb_input_instance *ins)
     ctx->ins = ins;
     mk_list_init(&ctx->connections);
 
+    ctx->oauth2_cfg.jwks_refresh_interval = 300;
+
     /* Load the config map */
     ret = flb_input_config_map_set(ins, (void *) ctx);
     if (ret == -1) {
         flb_free(ctx);
         return NULL;
+    }
+
+    /* Apply OAuth2 JWT config map properties if any */
+    if (ins->oauth2_jwt_config_map && mk_list_size(&ins->oauth2_jwt_properties) > 0) {
+        ret = flb_config_map_set(&ins->oauth2_jwt_properties, ins->oauth2_jwt_config_map,
+                                 &ctx->oauth2_cfg);
+        if (ret == -1) {
+            flb_free(ctx);
+            return NULL;
+        }
     }
 
     /* Listen interface (if not set, defaults to 0.0.0.0:9880) */
@@ -75,9 +88,7 @@ struct flb_http *http_config_create(struct flb_input_instance *ins)
 
     if (ret != FLB_EVENT_ENCODER_SUCCESS) {
         flb_plg_error(ctx->ins, "error initializing event encoder : %d", ret);
-
         http_config_destroy(ctx);
-
         return NULL;
     }
 
@@ -85,8 +96,17 @@ struct flb_http *http_config_create(struct flb_input_instance *ins)
 
     if (ctx->success_headers_str == NULL) {
         http_config_destroy(ctx);
-
         return NULL;
+    }
+
+    /* Create record accessor for tag_key if specified */
+    if (ctx->tag_key) {
+        ctx->ra_tag_key = flb_ra_create(ctx->tag_key, FLB_TRUE);
+        if (!ctx->ra_tag_key) {
+            flb_plg_error(ctx->ins, "invalid record accessor pattern for tag_key: %s", ctx->tag_key);
+            http_config_destroy(ctx);
+            return NULL;
+        }
     }
 
     flb_config_map_foreach(header_iterator, header_pair, ctx->success_headers) {
@@ -132,6 +152,10 @@ struct flb_http *http_config_create(struct flb_input_instance *ins)
 
 int http_config_destroy(struct flb_http *ctx)
 {
+    if (ctx->ra_tag_key) {
+        flb_ra_destroy(ctx->ra_tag_key);
+    }
+
     /* release all connections */
     http_conn_release_all(ctx);
 
@@ -157,6 +181,27 @@ int http_config_destroy(struct flb_http *ctx)
 
     if (ctx->success_headers_str != NULL) {
         flb_sds_destroy(ctx->success_headers_str);
+    }
+
+    if (ctx->oauth2_ctx) {
+        flb_oauth2_jwt_context_destroy(ctx->oauth2_ctx);
+        ctx->oauth2_ctx = NULL;
+        ctx->oauth2_cfg.issuer = NULL;
+        ctx->oauth2_cfg.jwks_url = NULL;
+        ctx->oauth2_cfg.allowed_audience = NULL;
+    }
+    else {
+        if (ctx->oauth2_cfg.issuer) {
+            flb_sds_destroy(ctx->oauth2_cfg.issuer);
+        }
+
+        if (ctx->oauth2_cfg.jwks_url) {
+            flb_sds_destroy(ctx->oauth2_cfg.jwks_url);
+        }
+
+        if (ctx->oauth2_cfg.allowed_audience) {
+            flb_sds_destroy(ctx->oauth2_cfg.allowed_audience);
+        }
     }
 
 

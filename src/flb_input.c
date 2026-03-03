@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@
 #include <fluent-bit/flb_scheduler.h>
 #include <fluent-bit/flb_ring_buffer.h>
 #include <fluent-bit/flb_processor.h>
+#include <fluent-bit/flb_oauth2_jwt.h>
 
 /* input plugin macro helpers */
 #include <fluent-bit/flb_input_plugin.h>
@@ -56,16 +57,20 @@ pthread_key_t libco_in_param_key;
 #define protcmp(a, b)  strncasecmp(a, b, strlen(a))
 
 /*
- * Ring buffer size: we make space for 512 entries that each input instance can
- * use to enqueue data. Note that this value is fixed and only affect input plugins
- * which runs in threaded mode (separate thread)
+ * Ring buffer capacity: by default we make space for 1024 entries that each
+ * input instance can use to enqueue data. The capacity can be customized per
+ * input instance through the 'thread.ring_buffer.capacity' property. The value
+ * represents the number of slots and is converted to bytes when the ring buffer
+ * is created. This affects only input plugins running in threaded mode.
  *
  * Ring buffer window: the current window size is set to 5% which means that the
- * ring buffer will emit a flush request whenever there are 51 records or more
- * awaiting to be consumed.
+ * ring buffer will emit a flush request whenever the window threshold is reached.
+ * The window percentage can be tuned per input instance using the
+ * 'thread.ring_buffer.window' property.
  */
 
-#define FLB_INPUT_RING_BUFFER_SIZE   (sizeof(void *) * 1024)
+#define FLB_INPUT_RING_BUFFER_CAPACITY 1024
+#define FLB_INPUT_RING_BUFFER_SIZE   (sizeof(void *) * FLB_INPUT_RING_BUFFER_CAPACITY)
 #define FLB_INPUT_RING_BUFFER_WINDOW (5)
 
 /* config map to register options available for all input plugins */
@@ -122,6 +127,16 @@ struct flb_config_map input_global_properties[] = {
         FLB_CONFIG_MAP_BOOL, "threaded", "false",
         0, FLB_FALSE, 0,
         "Enable threading on an input"
+    },
+    {
+        FLB_CONFIG_MAP_INT, "thread.ring_buffer.capacity", STR(FLB_INPUT_RING_BUFFER_CAPACITY),
+        0, FLB_FALSE, 0,
+        "Set custom ring buffer capacity when the input runs in threaded mode"
+    },
+    {
+        FLB_CONFIG_MAP_INT, "thread.ring_buffer.window", STR(FLB_INPUT_RING_BUFFER_WINDOW),
+        0, FLB_FALSE, 0,
+        "Set custom ring buffer window percentage for threaded inputs"
     },
 
     {0}
@@ -299,9 +314,9 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
             instance->context = NULL;
         }
         else {
-            struct flb_plugin_proxy_context *ctx;
+            struct flb_plugin_input_proxy_context *ctx;
 
-            ctx = flb_calloc(1, sizeof(struct flb_plugin_proxy_context));
+            ctx = flb_calloc(1, sizeof(struct flb_plugin_input_proxy_context));
             if (!ctx) {
                 flb_errno();
                 flb_free(instance);
@@ -338,8 +353,8 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         instance->host.ipv6    = FLB_FALSE;
 
         /* Initialize list heads */
-        mk_list_init(&instance->routes_direct);
-        mk_list_init(&instance->routes);
+        cfl_list_init(&instance->routes_direct);
+        cfl_list_init(&instance->routes);
         mk_list_init(&instance->tasks);
         mk_list_init(&instance->chunks);
         mk_list_init(&instance->collectors);
@@ -351,6 +366,7 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         /* Initialize properties list */
         flb_kv_init(&instance->properties);
         flb_kv_init(&instance->net_properties);
+        flb_kv_init(&instance->oauth2_jwt_properties);
 
         /* Plugin use networking */
         if (plugin->flags & (FLB_INPUT_NET | FLB_INPUT_NET_SERVER)) {
@@ -404,8 +420,12 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
 
         }
 
+        /* set default ring buffer size and window */
+        instance->ring_buffer_size = FLB_INPUT_RING_BUFFER_SIZE;
+        instance->ring_buffer_window = FLB_INPUT_RING_BUFFER_WINDOW;
+
         /* allocate a ring buffer */
-        instance->rb = flb_ring_buffer_create(FLB_INPUT_RING_BUFFER_SIZE);
+        instance->rb = flb_ring_buffer_create(instance->ring_buffer_size);
         if (!instance->rb) {
             flb_error("instance %s could not initialize ring buffer",
                       flb_input_name(instance));
@@ -618,6 +638,16 @@ int flb_input_set_property(struct flb_input_instance *ins,
         }
         kv->val = tmp;
     }
+    else if (strncasecmp("oauth2", k, 6) == 0 && tmp) {
+        kv = flb_kv_item_create(&ins->oauth2_jwt_properties, (char *) k, NULL);
+        if (!kv) {
+            if (tmp) {
+                flb_sds_destroy(tmp);
+            }
+            return -1;
+        }
+        kv->val = tmp;
+    }
 
 #ifdef FLB_HAVE_TLS
     else if (prop_key_check("tls", k, len) == 0 && tmp) {
@@ -703,6 +733,31 @@ int flb_input_set_property(struct flb_input_instance *ins,
         }
 
         ins->is_threaded = enabled;
+    }
+    else if (prop_key_check("thread.ring_buffer.capacity", k, len) == 0 && tmp) {
+        ret = atoi(tmp);
+        flb_sds_destroy(tmp);
+        if (ret <= 0) {
+            return -1;
+        }
+        ins->ring_buffer_size = (size_t) ret * sizeof(void *);
+        if (ins->rb) {
+            flb_ring_buffer_destroy(ins->rb);
+            ins->rb = flb_ring_buffer_create(ins->ring_buffer_size);
+            if (!ins->rb) {
+                flb_error("instance %s could not initialize ring buffer", flb_input_name(ins));
+                return -1;
+            }
+        }
+    }
+    else if (prop_key_check("thread.ring_buffer.window", k, len) == 0 && tmp) {
+        ret = atoi(tmp);
+        flb_sds_destroy(tmp);
+        if (ret <= 0 || ret > 100) {
+            flb_error("[input] thread.ring_buffer.window must be between 1 and 100");
+            return -1;
+        }
+        ins->ring_buffer_window = (uint8_t) ret;
     }
     else if (prop_key_check("storage.pause_on_chunks_overlimit", k, len) == 0 && tmp) {
         ret = flb_utils_bool(tmp);
@@ -835,6 +890,7 @@ void flb_input_instance_destroy(struct flb_input_instance *ins)
     /* release properties */
     flb_kv_release(&ins->properties);
     flb_kv_release(&ins->net_properties);
+    flb_kv_release(&ins->oauth2_jwt_properties);
 
 
 #ifdef FLB_HAVE_CHUNK_TRACE
@@ -863,6 +919,10 @@ void flb_input_instance_destroy(struct flb_input_instance *ins)
 
     if (ins->net_config_map) {
         flb_config_map_destroy(ins->net_config_map);
+    }
+
+    if (ins->oauth2_jwt_config_map) {
+        flb_config_map_destroy(ins->oauth2_jwt_config_map);
     }
 
     /* hash table for chunks */
@@ -1045,6 +1105,38 @@ int flb_input_plugin_property_check(struct flb_input_instance *ins,
     return 0;
 }
 
+int flb_input_oauth2_jwt_property_check(struct flb_input_instance *ins,
+                                         struct flb_config *config)
+{
+    int ret = 0;
+
+    /* Get OAuth2 JWT configmap */
+    ins->oauth2_jwt_config_map = flb_oauth2_jwt_get_config_map(config);
+    if (!ins->oauth2_jwt_config_map) {
+        flb_input_instance_destroy(ins);
+        return -1;
+    }
+
+    /*
+     * Validate 'oauth2*' properties: if the plugin uses OAuth2 JWT,
+     * it might receive OAuth2 JWT settings.
+     */
+    if (mk_list_size(&ins->oauth2_jwt_properties) > 0) {
+        ret = flb_config_map_properties_check(ins->p->name,
+                                              &ins->oauth2_jwt_properties,
+                                              ins->oauth2_jwt_config_map);
+        if (ret == -1) {
+            if (config->program_name) {
+                flb_helper("try the command: %s -i %s -h\n",
+                           config->program_name, ins->p->name);
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int flb_input_instance_init(struct flb_input_instance *ins,
                             struct flb_config *config)
 {
@@ -1194,6 +1286,34 @@ int flb_input_instance_init(struct flb_input_instance *ins,
         cmt_counter_set(ins->cmt_memrb_dropped_bytes, ts, 0, 1, (char *[]) {name});
     }
 
+    /* fluentbit_input_ring_buffer_writes_total */
+    ins->cmt_ring_buffer_writes = \
+        cmt_counter_create(ins->cmt,
+                            "fluentbit", "input",
+                            "ring_buffer_writes_total",
+                            "Number of ring buffer writes.",
+                            1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_ring_buffer_writes, ts, 0, 1, (char *[]) {name});
+
+    /* fluentbit_input_ring_buffer_retries_total */
+    ins->cmt_ring_buffer_retries = \
+        cmt_counter_create(ins->cmt,
+                            "fluentbit", "input",
+                            "ring_buffer_retries_total",
+                            "Number of ring buffer retries.",
+                            1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_ring_buffer_retries, ts, 0, 1, (char *[]) {name});
+
+
+    /* fluentbit_input_ring_buffer_retry_failures_total */
+    ins->cmt_ring_buffer_retry_failures = \
+        cmt_counter_create(ins->cmt,
+                            "fluentbit", "input",
+                            "ring_buffer_retry_failures_total",
+                            "Number of ring buffer retry failures.",
+                            1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_ring_buffer_retry_failures, ts, 0, 1, (char *[]) {name});
+
     /* OLD Metrics */
     ins->metrics = flb_metrics_create(name);
     if (ins->metrics) {
@@ -1208,6 +1328,16 @@ int flb_input_instance_init(struct flb_input_instance *ins,
      */
     if (flb_input_plugin_property_check(ins, config) == -1) {
         return -1;
+    }
+
+    /*
+     * Validate 'oauth2*' properties: if the plugin uses OAuth2 JWT,
+     * it might receive OAuth2 JWT settings.
+     */
+    if (mk_list_size(&ins->oauth2_jwt_properties) > 0) {
+        if (flb_input_oauth2_jwt_property_check(ins, config) == -1) {
+            return -1;
+        }
     }
 
 #ifdef FLB_HAVE_TLS
@@ -1320,7 +1450,7 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             }
 
             /* register the ring buffer */
-            ret = flb_ring_buffer_add_event_loop(ins->rb, config->evl, FLB_INPUT_RING_BUFFER_WINDOW);
+            ret = flb_ring_buffer_add_event_loop(ins->rb, config->evl, ins->ring_buffer_window);
             if (ret) {
                 flb_error("failed while registering ring buffer events on input %s",
                           ins->name);
@@ -1501,7 +1631,7 @@ int flb_input_check(struct flb_config *config)
 /*
  * API for Input plugins
  * =====================
- *  Copyright (C) 2015-2024 The Fluent Bit Authors
+ *  Copyright (C) 2015-2026 The Fluent Bit Authors
  * The Input interface provides a certain number of functions that can be
  * used by Input plugins to configure it own behavior and request specific
  *
@@ -1578,11 +1708,25 @@ static struct flb_input_collector *collector_create(int type,
         coll->evl = thi->evl;
     }
     else {
-        /* We need to obtain the event loop from the TLS when
-         * creating collectors for non threaded plugins running
-         * under a threaded plugin.
+        struct mk_event_loop *tls_evl;
+
+        /*
+         * Collectors for non-threaded plugins normally run on the main
+         * engine event loop. When a private helper input such as the
+         * emitter is instantiated from within a threaded input (e.g. via
+         * an input processor), the input thread stores its own event loop
+         * in TLS.  Those helper inputs must continue to use the main
+         * engine event loop to avoid spinning the input thread.
          */
-        coll->evl = flb_engine_evl_get();
+        tls_evl = flb_engine_evl_get();
+
+        if (tls_evl != NULL && tls_evl != config->evl &&
+            !(ins->p && (ins->p->flags & FLB_INPUT_PRIVATE))) {
+            coll->evl = tls_evl;
+        }
+        else {
+            coll->evl = config->evl;
+        }
     }
 
     /*
@@ -1936,7 +2080,6 @@ int flb_input_collector_destroy(struct flb_input_collector *coll)
     if (coll->type == FLB_COLLECT_TIME) {
         if (coll->fd_timer > 0) {
             mk_event_timeout_destroy(config->evl, &coll->event);
-            mk_event_closesocket(coll->fd_timer);
         }
     }
     else {
@@ -1951,7 +2094,6 @@ int flb_input_collector_destroy(struct flb_input_collector *coll)
 int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
 {
     int ret;
-    flb_pipefd_t fd;
     struct flb_input_collector *coll;
 
     coll = get_collector(coll_id, in);
@@ -1972,10 +2114,8 @@ int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
          * Note: Invalidate fd_timer first in case closing a socket
          * invokes another event.
          */
-        fd = coll->fd_timer;
         coll->fd_timer = -1;
         mk_event_timeout_destroy(coll->evl, &coll->event);
-        mk_event_closesocket(fd);
     }
     else if (coll->type & (FLB_COLLECT_FD_SERVER | FLB_COLLECT_FD_EVENT)) {
         ret = mk_event_del(coll->evl, &coll->event);
