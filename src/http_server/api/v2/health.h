@@ -17,12 +17,12 @@
  *  limitations under the License.
  */
 
-#ifndef FLB_IN_OPENTELEMETRY_PROT
-#define FLB_IN_OPENTELEMETRY_PROT
+#ifndef FLB_HS_API_V2_HEALTH_H
+#define FLB_HS_API_V2_HEALTH_H
 
-#include <fluent-bit/flb_http_common.h>
+#include <fluent-bit/flb_info.h>
+#include <fluent-bit/flb_http_server.h>
 
-int opentelemetry_prot_handle_ng(struct flb_http_request *request,
-                                 struct flb_http_response *response);
+int api_v2_health(struct flb_hs *hs);
 
 #endif

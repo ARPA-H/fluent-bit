@@ -17,12 +17,22 @@
  *  limitations under the License.
  */
 
-#ifndef FLB_IN_OPENTELEMETRY_PROT
-#define FLB_IN_OPENTELEMETRY_PROT
+#ifndef FLB_HTTP_SERVER_CONFIG_MAP_H
+#define FLB_HTTP_SERVER_CONFIG_MAP_H
 
-#include <fluent-bit/flb_http_common.h>
+#include <stddef.h>
 
-int opentelemetry_prot_handle_ng(struct flb_http_request *request,
-                                 struct flb_http_response *response);
+#include <fluent-bit/flb_config_map.h>
+#include <fluent-bit/http_server/flb_http_server.h>
+
+extern struct flb_config_map flb_http_server_config_map[];
+
+struct mk_list *flb_http_server_get_config_map(struct flb_config *config);
+
+int flb_http_server_property_is_allowed(const char *property_name);
+
+int flb_http_server_config_map_set(struct mk_list *properties,
+                                   struct mk_list *config_map,
+                                   struct flb_http_server_config *context);
 
 #endif
