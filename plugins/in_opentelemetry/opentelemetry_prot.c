@@ -493,6 +493,7 @@ static int process_payload_metrics_ng(struct flb_opentelemetry *ctx,
 {
     struct cfl_list  decoded_contexts;
     struct cfl_list *iterator;
+    struct cfl_list *tmp;
     struct cmt      *context;
     size_t           offset;
     int              result = -1;
@@ -518,12 +519,26 @@ static int process_payload_metrics_ng(struct flb_opentelemetry *ctx,
     }
 
     if (result == CMT_DECODE_OPENTELEMETRY_SUCCESS) {
-        cfl_list_foreach(iterator, &decoded_contexts) {
+        cfl_list_foreach_safe(iterator, tmp, &decoded_contexts) {
             context = cfl_list_entry(iterator, struct cmt, _head);
 
-            result = flb_input_metrics_append(ctx->ins, tag, cfl_sds_len(tag), context);
+            if (opentelemetry_uses_worker_ingress_queue(ctx)) {
+                cfl_list_del(&context->_head);
+            }
 
-            if (result != 0) {
+            result = opentelemetry_ingest_metrics(ctx,
+                                                  tag,
+                                                  cfl_sds_len(tag),
+                                                  context);
+
+            if (result == FLB_INPUT_INGRESS_BUSY) {
+                cmt_decode_opentelemetry_destroy(&decoded_contexts);
+                return FLB_INPUT_INGRESS_BUSY;
+            }
+            else if (result != 0) {
+                if (opentelemetry_uses_worker_ingress_queue(ctx)) {
+                    cmt_destroy(context);
+                }
                 flb_plg_debug(ctx->ins, "could not ingest metrics context : %d", result);
             }
         }
@@ -588,13 +603,46 @@ static int ingest_profiles_context_as_log_entry(struct flb_opentelemetry *ctx,
         return -4;
     }
 
-    ret = flb_input_log_append(ctx->ins,
-                               tag,
-                               flb_sds_len(tag),
-                               encoder->output_buffer,
-                               encoder->output_length);
+    if (opentelemetry_uses_worker_ingress_queue(ctx)) {
+        size_t allocation_size;
+        void *resized_buffer;
+
+        allocation_size = encoder->buffer.alloc;
+
+        if (allocation_size > encoder->output_length) {
+            resized_buffer = flb_realloc(encoder->output_buffer,
+                                         encoder->output_length);
+            if (resized_buffer != NULL) {
+                encoder->buffer.data = resized_buffer;
+                encoder->output_buffer = resized_buffer;
+                encoder->buffer.alloc = encoder->output_length;
+                allocation_size = encoder->output_length;
+            }
+        }
+
+        ret = opentelemetry_ingest_logs_take(ctx,
+                                             tag,
+                                             flb_sds_len(tag),
+                                             encoder->output_buffer,
+                                             encoder->output_length,
+                                             allocation_size);
+        if (ret == 0 || ret == FLB_INPUT_INGRESS_BUSY) {
+            flb_log_event_encoder_claim_internal_buffer_ownership(encoder);
+        }
+    }
+    else {
+        ret = opentelemetry_ingest_logs(ctx,
+                                        tag,
+                                        flb_sds_len(tag),
+                                        encoder->output_buffer,
+                                        encoder->output_length);
+    }
 
     flb_log_event_encoder_destroy(encoder);
+
+    if (ret == FLB_INPUT_INGRESS_BUSY) {
+        return FLB_INPUT_INGRESS_BUSY;
+    }
 
     if (ret != FLB_EVENT_ENCODER_SUCCESS) {
         return -5;
@@ -644,15 +692,24 @@ static int process_payload_profiles_ng(struct flb_opentelemetry *ctx,
             ret = ingest_profiles_context_as_log_entry(ctx,
                                                        tag,
                                                        profiles_context);
+
+            cprof_decode_opentelemetry_destroy(profiles_context);
         }
         else {
-            ret = flb_input_profiles_append(ctx->ins,
-                                            tag,
-                                            flb_sds_len(tag),
-                                            profiles_context);
+            ret = opentelemetry_ingest_profiles(ctx,
+                                                tag,
+                                                flb_sds_len(tag),
+                                                profiles_context);
+
+            if (ret != FLB_INPUT_INGRESS_BUSY &&
+                (ret != 0 || !opentelemetry_uses_worker_ingress_queue(ctx))) {
+                cprof_decode_opentelemetry_destroy(profiles_context);
+            }
         }
 
-        cprof_decode_opentelemetry_destroy(profiles_context);
+        if (ret == FLB_INPUT_INGRESS_BUSY) {
+            return ret;
+        }
 
         if (ret != 0) {
             flb_error("[otel] profile ingestion error : %d",
@@ -690,6 +747,18 @@ static int send_export_service_response_ng(struct flb_http_response *response,
     }
 }
 
+static int send_ingress_busy_response_ng(struct flb_http_response *response,
+                                         int grpc_request)
+{
+    if (grpc_request == FLB_TRUE) {
+        return send_grpc_error_response_ng(response, 14, "server overloaded");
+    }
+
+    return send_response_ng(response,
+                            503,
+                            "server overloaded: deferred ingress queue is full\n");
+}
+
 /*
  * Protocol handle for requests coming from HTTP/2 server backend. Note that
  * if the payload is compressed (Content-Encoding) it will be decompressed
@@ -702,11 +771,13 @@ int opentelemetry_prot_handle_ng(struct flb_http_request *request,
                                  struct flb_http_response *response)
 {
     int ret = -1;
+    size_t auth_len = 0;
     int grpc_request = FLB_FALSE;
     int grpc_uncompressed = FLB_FALSE;
     size_t grpc_offset = 0;
     uint64_t  grpc_size = 0;
     flb_sds_t tag = NULL;
+    char *auth_header = NULL;
     char payload_type;
     char *encoding = NULL;
     size_t encoding_size = 0;
@@ -755,6 +826,29 @@ int opentelemetry_prot_handle_ng(struct flb_http_request *request,
             return -1;
         }
         return -1;
+    }
+
+    if (context->oauth2_ctx) {
+        auth_header = flb_http_request_get_header(request, "authorization");
+        if (auth_header != NULL) {
+            auth_len = strlen(auth_header);
+        }
+
+        ret = flb_oauth2_jwt_validate(context->oauth2_ctx, auth_header, auth_len);
+        if (ret != FLB_OAUTH2_JWT_OK) {
+            flb_plg_error(context->ins,
+                          "OAuth2 validation failed: %s (rejecting request with 401)",
+                          flb_oauth2_jwt_status_message(ret));
+
+            if (grpc_request) {
+                send_grpc_error_response_ng(response, 16, "unauthorized");
+            }
+            else {
+                send_response_ng(response, 401, NULL);
+            }
+
+            return -1;
+        }
     }
 
     if (request->method != HTTP_METHOD_POST) {
@@ -959,11 +1053,19 @@ next_grpc_message:
             goto next_grpc_message;
         }
 
-        send_export_service_response_ng(response, ret, payload_type);
+        if (ret == FLB_INPUT_INGRESS_BUSY) {
+            send_ingress_busy_response_ng(response, grpc_request);
+        }
+        else {
+            send_export_service_response_ng(response, ret, payload_type);
+        }
     }
     else {
         if (ret == 0) {
             send_response_ng(response, context->successful_response_code, NULL);
+        }
+        else if (ret == FLB_INPUT_INGRESS_BUSY) {
+            send_ingress_busy_response_ng(response, grpc_request);
         }
         else {
             send_response_ng(response, 400, "invalid request: deserialisation error\n");
