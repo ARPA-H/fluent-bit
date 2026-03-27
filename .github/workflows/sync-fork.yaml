@@ -49,7 +49,7 @@ jobs:
           echo "latest_local_tag=$LATEST_LOCAL_TAG" >> "$GITHUB_OUTPUT"
           echo "latest_local_tag_sha=$LATEST_LOCAL_TAG_SHA" >> "$GITHUB_OUTPUT"
           
-          git fetch upstream --tags
+          git fetch upstream --tags --force
           # Get the latest upstream tag (after fetching, it's now local)
           # We again sort by version. This will give you the latest tag from the *combined* set
           # of local tags and fetched upstream tags. If a new upstream tag is newer, it will be found.
@@ -86,6 +86,7 @@ jobs:
           elif [ "$LATEST_UPSTREAM_TAG" = "$LATEST_LOCAL_TAG" ] && [ "$LATEST_UPSTREAM_TAG_SHA" != "$LATEST_LOCAL_TAG_SHA" ]; then
             echo "Latest tag '$LATEST_UPSTREAM_TAG' has been modified (SHA changed). Build required."
             BUILD_REQUIRED="true"
+            git push --force origin "$LATEST_UPSTREAM_TAG"
           else
             echo "No new tags or changes to the latest tag. No build required."
           fi
