@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      latest_tag: ${{ steps.get_tags.outputs.latest_upstream_tag }}
+      latest_tag: ${{ steps.compare.outputs.latest_upstream_tag }}
       should_build: ${{ steps.compare.outputs.build_required }}
 
     steps:
@@ -35,62 +35,30 @@ jobs:
           # git merge upstream/master
           # git push origin master
         
-      - name: Get Latest Local Tag and Upstream Tag SHAs
-        id: get_tags
-        run: |
-
-          # Get the latest local tag (if any)
-          LATEST_LOCAL_TAG=$(git tag --sort=-v:refname | head -n 1)
-          LATEST_LOCAL_TAG_SHA=""
-          if [ -n "$LATEST_LOCAL_TAG" ]; then
-            LATEST_LOCAL_TAG_SHA=$(git rev-parse $LATEST_LOCAL_TAG)
-          fi
-          echo "Latest Local Tag: $LATEST_LOCAL_TAG (SHA: $LATEST_LOCAL_TAG_SHA)"
-          echo "latest_local_tag=$LATEST_LOCAL_TAG" >> "$GITHUB_OUTPUT"
-          echo "latest_local_tag_sha=$LATEST_LOCAL_TAG_SHA" >> "$GITHUB_OUTPUT"
-          
-          git fetch upstream --tags --force
-          # Get the latest upstream tag (after fetching, it's now local)
-          # We again sort by version. This will give you the latest tag from the *combined* set
-          # of local tags and fetched upstream tags. If a new upstream tag is newer, it will be found.
-          LATEST_UPSTREAM_TAG=$(git tag --sort=-v:refname | head -n 1)
-          LATEST_UPSTREAM_TAG_SHA=$(git rev-parse $LATEST_UPSTREAM_TAG)
-          echo "Latest Upstream Tag (after fetch): $LATEST_UPSTREAM_TAG (SHA: $LATEST_UPSTREAM_TAG_SHA)"
-          echo "latest_upstream_tag=$LATEST_UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
-          echo "latest_upstream_tag_sha=$LATEST_UPSTREAM_TAG_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Compare Tags
+      - name: Get latest upstream release and compare
         id: compare
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          # Get the latest official release tag from upstream (excludes drafts and prereleases)
+          LATEST_UPSTREAM_TAG=$(gh api repos/fluent/fluent-bit/releases/latest --jq '.tag_name')
+          echo "Latest upstream release: $LATEST_UPSTREAM_TAG"
+
+          # Check if we already have a matching release in our fork
+          LOCAL_RELEASE=$(gh api repos/${{ github.repository }}/releases/tags/$LATEST_UPSTREAM_TAG --jq '.tag_name' 2>/dev/null || echo "")
+
           BUILD_REQUIRED="false"
-          LATEST_LOCAL_TAG="${{ steps.get_tags.outputs.latest_local_tag }}"
-          LATEST_LOCAL_TAG_SHA="${{ steps.get_tags.outputs.latest_local_tag_sha }}"
-          LATEST_UPSTREAM_TAG="${{ steps.get_tags.outputs.latest_upstream_tag }}"
-          LATEST_UPSTREAM_TAG_SHA="${{ steps.get_tags.outputs.latest_upstream_tag_sha }}"
-
-          echo "Comparing..."
-          echo "Local Tag: $LATEST_LOCAL_TAG (SHA: $LATEST_LOCAL_TAG_SHA)"
-          echo "Upstream Tag: $LATEST_UPSTREAM_TAG (SHA: $LATEST_UPSTREAM_TAG_SHA)"
-
-          # Scenario 1: No local tags, but upstream has tags
-          if [ -z "$LATEST_LOCAL_TAG" ] && [ -n "$LATEST_UPSTREAM_TAG" ]; then
-            echo "No local tags found, but upstream has tags. Build required."
+          if [ -z "$LOCAL_RELEASE" ]; then
+            echo "No local release for $LATEST_UPSTREAM_TAG. Build required."
             BUILD_REQUIRED="true"
-            git push origin "$LATEST_UPSTREAM_TAG"
-          # Scenario 2: Latest upstream tag is different from latest local tag
-          elif [ "$LATEST_UPSTREAM_TAG" != "$LATEST_LOCAL_TAG" ]; then
-            echo "Upstream has a new latest tag: $LATEST_UPSTREAM_TAG. Build required."
-            BUILD_REQUIRED="true"
-            git push origin "$LATEST_UPSTREAM_TAG"
-          # Scenario 3: Latest tags have the same name, but point to different commits (tag moved/recreated)
-          elif [ "$LATEST_UPSTREAM_TAG" = "$LATEST_LOCAL_TAG" ] && [ "$LATEST_UPSTREAM_TAG_SHA" != "$LATEST_LOCAL_TAG_SHA" ]; then
-            echo "Latest tag '$LATEST_UPSTREAM_TAG' has been modified (SHA changed). Build required."
-            BUILD_REQUIRED="true"
-            git push --force origin "$LATEST_UPSTREAM_TAG"
+            # Fetch just this tag from upstream and push it to our fork
+            git fetch upstream tag "$LATEST_UPSTREAM_TAG" --force
+            git push origin "$LATEST_UPSTREAM_TAG" --force
           else
-            echo "No new tags or changes to the latest tag. No build required."
+            echo "Local release $LOCAL_RELEASE already exists. No build required."
           fi
 
+          echo "latest_upstream_tag=$LATEST_UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
           echo "build_required=$BUILD_REQUIRED" >> "$GITHUB_OUTPUT"
 
   build-and-release:
