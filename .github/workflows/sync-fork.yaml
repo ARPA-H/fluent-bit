@@ -45,17 +45,15 @@ jobs:
           echo "Latest upstream release: $LATEST_UPSTREAM_TAG"
 
           # Check if we already have a matching release in our fork
-          LOCAL_RELEASE=$(gh api repos/${{ github.repository }}/releases/tags/$LATEST_UPSTREAM_TAG --jq '.tag_name' 2>/dev/null || echo "")
-
           BUILD_REQUIRED="false"
-          if [ -z "$LOCAL_RELEASE" ]; then
+          if gh api repos/${{ github.repository }}/releases/tags/$LATEST_UPSTREAM_TAG --silent 2>/dev/null; then
+            echo "Local release $LATEST_UPSTREAM_TAG already exists. No build required."
+          else
             echo "No local release for $LATEST_UPSTREAM_TAG. Build required."
             BUILD_REQUIRED="true"
             # Fetch just this tag from upstream and push it to our fork
             git fetch upstream tag "$LATEST_UPSTREAM_TAG" --force
             git push origin "$LATEST_UPSTREAM_TAG" --force
-          else
-            echo "Local release $LOCAL_RELEASE already exists. No build required."
           fi
 
           echo "latest_upstream_tag=$LATEST_UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
