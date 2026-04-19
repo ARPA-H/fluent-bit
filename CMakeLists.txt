@@ -10,7 +10,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 # Fluent Bit Version
 set(FLB_VERSION_MAJOR  5)
 set(FLB_VERSION_MINOR  0)
-set(FLB_VERSION_PATCH  0)
+set(FLB_VERSION_PATCH  4)
 set(FLB_VERSION_STR "${FLB_VERSION_MAJOR}.${FLB_VERSION_MINOR}.${FLB_VERSION_PATCH}")
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -723,15 +723,20 @@ endif()
 # ring buffer library
 add_subdirectory(${FLB_PATH_LIB_RING_BUFFER} EXCLUDE_FROM_ALL)
 
-# yyson
-add_subdirectory(${FLB_PATH_LIB_YYJSON} EXCLUDE_FROM_ALL)
-if (TARGET yyjson AND NOT FLB_COVERAGE AND
-    CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang|Intel")
-  # yyjson's O0 reader can exceed the default coroutine stack budget.
-  # Keep debug symbols, but force enough optimization to shrink the frame.
-  target_compile_options(yyjson PRIVATE
-    $<$<AND:$<COMPILE_LANGUAGE:C>,$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>>:-Og>
-  )
+# yyjson
+option(FLB_YYJSON "Enable yyjson backend" ON)
+if(FLB_YYJSON)
+  add_subdirectory(${FLB_PATH_LIB_YYJSON} EXCLUDE_FROM_ALL)
+  FLB_DEFINITION(FLB_HAVE_YYJSON)
+
+  if (TARGET yyjson AND NOT FLB_COVERAGE AND
+      CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang|Intel")
+    # yyjson's O0 reader can exceed the default coroutine stack budget.
+    # Keep debug symbols, but force enough optimization to shrink the frame.
+    target_compile_options(yyjson PRIVATE
+      $<$<AND:$<COMPILE_LANGUAGE:C>,$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>>:-Og>
+    )
+  endif()
 endif()
 
 # Avro

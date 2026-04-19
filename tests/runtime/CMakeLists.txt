@@ -27,6 +27,7 @@ endmacro()
 FLB_RT_CORE_TEST(FLB_COROUTINE_TIMEOUT    "core-timeout.c")
 FLB_RT_CORE_TEST(FLB_INTERNAL_LOGGER      "core_internal_logger.c")
 FLB_RT_CORE_TEST(FLB_DOWNSTREAM_ACCEPT_TIMEOUT "core_accept_timeout.c")
+FLB_RT_CORE_TEST(1 "http_client_chunked.c")
 
 FLB_RT_TEST(FLB_CHUNK_TRACE "core_chunk_trace.c")
 
@@ -164,9 +165,16 @@ if(FLB_IN_EBPF)
         "../../plugins/in_ebpf/traces/malloc/handler.c"
     )
 
+    add_ebpf_handler_test(
+        "tcp"
+        "in_ebpf_tcp_handler.c"
+        "../../plugins/in_ebpf/traces/tcp/handler.c"
+    )
+
     add_dependencies(flb-rt-in_ebpf_bind_handler fluent-bit-static)
     add_dependencies(flb-rt-in_ebpf_signal_handler fluent-bit-static)
     add_dependencies(flb-rt-in_ebpf_malloc_handler fluent-bit-static)
+    add_dependencies(flb-rt-in_ebpf_tcp_handler fluent-bit-static)
 
 endif()
 
@@ -331,7 +339,8 @@ flb_runtime_lock_tests("runtime-port-2020"
 
 flb_runtime_lock_tests("runtime-port-4318"
   flb-rt-in_opentelemetry
-  flb-rt-in_opentelemetry_routing)
+  flb-rt-in_opentelemetry_routing
+  flb-rt-processor_cumulative_to_delta)
 
 flb_runtime_lock_tests("runtime-port-5170"
   flb-rt-in_tcp

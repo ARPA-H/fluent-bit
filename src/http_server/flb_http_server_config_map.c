@@ -48,6 +48,16 @@ struct flb_config_map flb_http_server_config_map[] = {
      "Set the number of HTTP listener workers"
     },
     {
+     FLB_CONFIG_MAP_SIZE, "http_server.ingress_queue_event_limit", "8192",
+     0, FLB_TRUE, offsetof(struct flb_http_server_config, ingress_queue_event_limit),
+     "Set the maximum number of deferred ingress queue events. Applies only when http_server.workers > 1."
+    },
+    {
+     FLB_CONFIG_MAP_SIZE, "http_server.ingress_queue_byte_limit", "256M",
+     0, FLB_TRUE, offsetof(struct flb_http_server_config, ingress_queue_byte_limit),
+     "Set the maximum number of deferred ingress queue bytes. Applies only when http_server.workers > 1."
+    },
+    {
      FLB_CONFIG_MAP_BOOL, "http2", "true",
      0, FLB_TRUE, offsetof(struct flb_http_server_config, http2),
      "Compatibility alias for http_server.http2"
@@ -80,11 +90,12 @@ struct mk_list *flb_http_server_get_config_map(struct flb_config *config)
     return flb_config_map_create(config, flb_http_server_config_map);
 }
 
-int flb_http_server_config_map_set(struct mk_list *properties,
+int flb_http_server_config_map_set(struct flb_config *config,
+                                   struct mk_list *properties,
                                    struct mk_list *config_map,
                                    struct flb_http_server_config *context)
 {
-    return flb_config_map_set(properties, config_map, context);
+    return flb_config_map_set(config, properties, config_map, context);
 }
 
 int flb_http_server_property_is_allowed(const char *property_name)
