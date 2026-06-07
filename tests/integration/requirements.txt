@@ -28,7 +28,7 @@ ordered-set==4.1.0
 packaging==24.1
 pluggy==1.5.0
 protobuf==4.25.3
-pytest==8.2.2
+pytest==9.0.3
 PyYAML==6.0.1
 requests==2.32.3
 soupsieve==2.5
