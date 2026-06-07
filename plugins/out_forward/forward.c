@@ -840,6 +840,11 @@ static int config_set_properties(struct flb_upstream_node *node,
         fc->send_options = flb_utils_bool(tmp);
     }
 
+    tmp = config_get_property("retain_metadata_in_forward_mode", node, ctx);
+    if (tmp) {
+        fc->fwd_retain_metadata = flb_utils_bool(tmp);
+    }
+
     /* add_option -> extra_options: if the user has defined 'add_option'
      * we need to enable the 'send_options' flag
      */
@@ -1739,7 +1744,7 @@ static struct flb_config_map config_map[] = {
      "Set timestamp in integer format (compat mode for old Fluentd v0.12)"
     },
     {
-     FLB_CONFIG_MAP_BOOL, "retain_metadata_in_forward_mode", "false",
+     FLB_CONFIG_MAP_BOOL, "retain_metadata_in_forward_mode", "true",
      0, FLB_TRUE, offsetof(struct flb_forward_config, fwd_retain_metadata),
      "Retain metadata when operating in forward mode"
     },

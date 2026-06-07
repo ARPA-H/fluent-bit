@@ -27,6 +27,7 @@
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_input.h>
 #include <fluent-bit/flb_input_chunk.h>
+#include <fluent-bit/flb_input_log.h>
 #include <fluent-bit/flb_input_plugin.h>
 #include <fluent-bit/flb_storage.h>
 #include <fluent-bit/flb_time.h>
@@ -53,9 +54,12 @@
 #define FLB_INPUT_CHUNK_RELEASE_SCOPE_LOCAL  0
 #define FLB_INPUT_CHUNK_RELEASE_SCOPE_GLOBAL 1
 
+#define FLB_INPUT_CHUNK_RAW_LOG_ROUTING      (1 << 0)
+
 struct input_chunk_raw {
     struct flb_input_instance *ins;
     int event_type;
+    int flags;
     size_t records;
     flb_sds_t tag;
     void *buf_data;
@@ -2977,6 +2981,7 @@ static void destroy_chunk_raw(struct input_chunk_raw *cr)
 
 static int append_to_ring_buffer(struct flb_input_instance *ins,
                                  int event_type,
+                                 int flags,
                                  size_t records,
                                  const char *tag,
                                  size_t tag_len,
@@ -3001,6 +3006,7 @@ static int append_to_ring_buffer(struct flb_input_instance *ins,
     }
     cr->ins = ins;
     cr->event_type = event_type;
+    cr->flags = flags;
 
     if (tag && tag_len > 0) {
         cr->tag = flb_sds_create_len(tag, tag_len);
@@ -3123,9 +3129,17 @@ void flb_input_chunk_ring_buffer_collector(struct flb_config *ctx, void *data)
                     tag_len = 0;
                 }
 
-                input_chunk_append_raw(cr->ins, cr->event_type, cr->records,
-                                       cr->tag, tag_len,
-                                       cr->buf_data, cr->buf_size);
+                if (cr->event_type == FLB_INPUT_LOGS &&
+                    (cr->flags & FLB_INPUT_CHUNK_RAW_LOG_ROUTING) != 0) {
+                    flb_input_log_append_processed(cr->ins, cr->records,
+                                                   cr->tag, tag_len,
+                                                   cr->buf_data, cr->buf_size);
+                }
+                else {
+                    input_chunk_append_raw(cr->ins, cr->event_type, cr->records,
+                                           cr->tag, tag_len,
+                                           cr->buf_data, cr->buf_size);
+                }
                 destroy_chunk_raw(cr);
             }
             cr = NULL;
@@ -3148,7 +3162,7 @@ int flb_input_chunk_append_raw(struct flb_input_instance *in,
      * add the data reference to the ring buffer.
      */
     if (flb_input_is_threaded(in)) {
-        ret = append_to_ring_buffer(in, event_type, records,
+        ret = append_to_ring_buffer(in, event_type, 0, records,
                                     tag, tag_len,
                                     buf, buf_size);
     }
@@ -3160,15 +3174,35 @@ int flb_input_chunk_append_raw(struct flb_input_instance *in,
     return ret;
 }
 
+int flb_input_chunk_append_raw_local(struct flb_input_instance *in,
+                                     int event_type,
+                                     size_t records,
+                                     const char *tag, size_t tag_len,
+                                     const void *buf, size_t buf_size)
+{
+    return input_chunk_append_raw(in, event_type, records,
+                                  tag, tag_len, buf, buf_size);
+}
+
 int flb_input_chunk_ring_buffer_enqueue(struct flb_input_instance *in,
                                         int event_type,
                                         size_t records,
                                         const char *tag, size_t tag_len,
                                         const void *buf, size_t buf_size)
 {
-    return append_to_ring_buffer(in, event_type, records,
+    return append_to_ring_buffer(in, event_type, 0, records,
                                  tag, tag_len,
                                  buf, buf_size);
+}
+
+int flb_input_chunk_ring_buffer_enqueue_log_routing(struct flb_input_instance *in,
+                                                    int event_type,
+                                                    size_t records,
+                                                    const char *tag, size_t tag_len,
+                                                    const void *buf, size_t buf_size)
+{
+    return append_to_ring_buffer(in, event_type, FLB_INPUT_CHUNK_RAW_LOG_ROUTING,
+                                 records, tag, tag_len, buf, buf_size);
 }
 
 /* Retrieve a raw buffer from a dyntag node */
