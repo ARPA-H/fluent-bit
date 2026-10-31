@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.12)
 project(fluent-bit C)
 
+option(FLB_WASM_BROWSER "Enable the experimental Emscripten browser build profile" OFF)
+if(FLB_WASM_BROWSER)
+  include(cmake/wasm-browser.cmake)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+  message(FATAL_ERROR "Emscripten builds require -DFLB_WASM_BROWSER=ON")
+endif()
+
 include(CheckCCompilerFlag)
 
 # CMP0069 ensures that LTO is enabled for all compilers
@@ -9,8 +16,8 @@ set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 
 # Fluent Bit Version
 set(FLB_VERSION_MAJOR  5)
-set(FLB_VERSION_MINOR  0)
-set(FLB_VERSION_PATCH  7)
+set(FLB_VERSION_MINOR  2)
+set(FLB_VERSION_PATCH  0)
 set(FLB_VERSION_STR "${FLB_VERSION_MAJOR}.${FLB_VERSION_MINOR}.${FLB_VERSION_PATCH}")
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -130,9 +137,15 @@ endif()
 INCLUDE(TestBigEndian)
 include(GNUInstallDirs)
 include(ExternalProject)
-include(cmake/FindJournald.cmake)
+if(NOT FLB_WASM_BROWSER)
+  include(cmake/FindJournald.cmake)
+endif()
 include(cmake/FindMonkey.cmake)
 include(cmake/macros.cmake)
+if(FLB_WASM_BROWSER)
+  include(cmake/wasm-openssl.cmake)
+  include(cmake/wasm-filesystem.cmake)
+endif()
 include(cmake/platform_feature_checks.cmake)
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/sanitizers-cmake/cmake" ${CMAKE_MODULE_PATH})
 find_package(Sanitizers)
@@ -204,6 +217,10 @@ option(FLB_SQLDB               "Enable SQL embedded DB"       Yes)
 option(FLB_HTTP_SERVER         "Enable HTTP Server"           Yes)
 option(FLB_BACKTRACE           "Enable stacktrace support"    Yes)
 option(FLB_LUAJIT              "Enable Lua Scripting support" Yes)
+option(FLB_WASM_LUA            "Enable portable Lua in the browser build" No)
+if(FLB_WASM_LUA AND NOT FLB_WASM_BROWSER)
+  message(FATAL_ERROR "FLB_WASM_LUA requires FLB_WASM_BROWSER=ON")
+endif()
 option(FLB_RECORD_ACCESSOR     "Enable record accessor"       Yes)
 option(FLB_SIGNV4              "Enable AWS Signv4 support"    Yes)
 option(FLB_AWS                 "Enable AWS support"           Yes)
@@ -212,6 +229,7 @@ option(FLB_STREAM_PROCESSOR    "Enable Stream Processor"                    Yes)
 set(FLB_SIMD "Auto" CACHE STRING "Enable SIMD support (On, Off, Auto)")
 set_property(CACHE FLB_SIMD PROPERTY STRINGS "On;Off;Auto")
 option(FLB_CORO_STACK_SIZE     "Set coroutine stack size")
+option(FLB_PROTOBUF_ENCODER    "Build Kafka runtime Protobuf encoding support" No)
 option(FLB_AVRO_ENCODER        "Build with Avro encoding support"            No)
 option(FLB_AWS_ERROR_REPORTER  "Build with aws error reporting support"      No)
 option(FLB_ARROW               "Build with Apache Arrow support"             No)
@@ -374,6 +392,7 @@ if(FLB_ALL)
   # Output plugins
   set(FLB_OUT_ES          1)
   set(FLB_OUT_FORWARD     1)
+  set(FLB_OUT_GCS         1)
   set(FLB_OUT_GELF        1)
   set(FLB_OUT_HTTP        1)
   set(FLB_OUT_NATS        1)
@@ -388,6 +407,7 @@ if(FLB_ALL)
   set(FLB_OUT_LIB         1)
   set(FLB_OUT_FLOWCOUNTER 1)
   set(FLB_OUT_WEBSOCKET   1)
+  set(FLB_OUT_ARVANCLOUD_CLOUDLOGS 1)
 endif()
 
 if(FLB_DEV)
@@ -739,15 +759,17 @@ if(FLB_YYJSON)
   endif()
 endif()
 
-# Avro
-if(FLB_AVRO_ENCODER)
+# Schema Registry JSON support
+if(FLB_AVRO_ENCODER OR FLB_PROTOBUF_ENCODER)
   # jansson
   option(JANSSON_BUILD_DOCS         OFF)
   option(JANSSON_EXAMPLES           OFF)
   option(JANSSON_BUILD_SHARED_LIBS  OFF)
   set(JANSSON_WITHOUT_TESTS ON CACHE BOOL "" FORCE)
   add_subdirectory(${FLB_PATH_LIB_JANSSON})
+endif()
 
+if(FLB_AVRO_ENCODER)
   #avro
   add_subdirectory(${FLB_PATH_LIB_AVRO} EXCLUDE_FROM_ALL)
 endif()
@@ -816,6 +838,7 @@ add_subdirectory(${FLB_PATH_LIB_JSMN})
 # Runtime Tests (filter_kubernetes) requires HTTP Server
 if(FLB_TESTS_RUNTIME)
   FLB_OPTION(FLB_HTTP_SERVER  ON)
+  FLB_OPTION(FLB_IN_EVENT_TEST ON)
 endif()
 
 # Monkey Core Library
@@ -849,6 +872,13 @@ elseif (FLB_EVENT_LOOP_LIBEVENT)
 else()
   FLB_DEFINITION(FLB_EVENT_LOOP_AUTO_DISCOVERY)
   message(STATUS "FLB Event loop backend > auto discovery (Monkey library)")
+endif()
+
+# Monkey uses its bundled libevent backend on Windows. Link it statically so
+# Fluent Bit binaries do not require event.dll at runtime.
+if(FLB_SYSTEM_WINDOWS)
+  set(EVENT__LIBRARY_TYPE STATIC CACHE STRING
+      "Build Monkey's bundled libevent as a static library" FORCE)
 endif()
 
 # Build Monkey HTTP Server
@@ -1036,6 +1066,24 @@ if(JOURNALD_FOUND)
   if(FLB_HAVE_SYSTEMD_SDBUS)
     FLB_DEFINITION(FLB_HAVE_SYSTEMD_SDBUS)
   endif()
+
+  set(FLB_CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES})
+  set(FLB_CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
+  list(APPEND CMAKE_REQUIRED_INCLUDES ${JOURNALD_INCLUDE_DIR})
+  list(APPEND CMAKE_REQUIRED_LIBRARIES ${JOURNALD_LIBRARIES})
+
+  include(CheckSymbolExists)
+  check_symbol_exists(sd_journal_open_namespace "systemd/sd-journal.h"
+                      FLB_HAVE_SYSTEMD_JOURNAL_NAMESPACE)
+
+  set(CMAKE_REQUIRED_INCLUDES ${FLB_CMAKE_REQUIRED_INCLUDES})
+  set(CMAKE_REQUIRED_LIBRARIES ${FLB_CMAKE_REQUIRED_LIBRARIES})
+  unset(FLB_CMAKE_REQUIRED_INCLUDES)
+  unset(FLB_CMAKE_REQUIRED_LIBRARIES)
+
+  if(FLB_HAVE_SYSTEMD_JOURNAL_NAMESPACE)
+    FLB_DEFINITION(FLB_HAVE_SYSTEMD_JOURNAL_NAMESPACE)
+  endif()
 else()
   FLB_OPTION(FLB_IN_SYSTEMD OFF)
 endif()
@@ -1152,7 +1200,11 @@ else()
 endif ()
 
 # Configuration file YAML format support
-if(FLB_CONFIG_YAML)
+if(FLB_CONFIG_YAML AND FLB_WASM_BROWSER)
+  include(cmake/wasm-libyaml.cmake)
+  set(FLB_HAVE_LIBYAML 1)
+  FLB_DEFINITION(FLB_HAVE_LIBYAML)
+elseif(FLB_CONFIG_YAML)
   find_package(PkgConfig)
   # libyaml's corresponding pkg-config file is yaml-0.1.pc.
   # We should search it first.
@@ -1292,8 +1344,8 @@ if(FLB_JEMALLOC AND ${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     # Link to Jemalloc as an external dependency
     set(FLB_LIBJEMALLOC_PATH "${CMAKE_CURRENT_BINARY_DIR}/lib/libjemalloc_pic.a")
     ExternalProject_Add(jemalloc
-      SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.3.0
-      CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.3.0/configure ${AUTOCONF_HOST_OPT} "${FLB_JEMALLOC_OPTIONS_LIST}" --prefix=<INSTALL_DIR>
+      SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.4.0
+      CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/lib/jemalloc-5.4.0/configure ${AUTOCONF_HOST_OPT} "${FLB_JEMALLOC_OPTIONS_LIST}" --prefix=<INSTALL_DIR>
       CFLAGS=-std=gnu99\ -Wall\ -pipe\ -g3\ -O3\ -funroll-loops
       BUILD_COMMAND ${EXTERNAL_BUILD_TOOL}
       BUILD_BYPRODUCTS ${FLB_LIBJEMALLOC_PATH}
@@ -1340,6 +1392,19 @@ if(FLB_UTF8_ENCODER)
   FLB_DEFINITION(FLB_HAVE_UTF8_ENCODER)
 endif()
 
+# Kafka runtime schema serializers
+if(FLB_AVRO_ENCODER OR FLB_PROTOBUF_ENCODER)
+  FLB_DEFINITION(FLB_HAVE_KAFKA_SCHEMA_REGISTRY)
+endif()
+if(FLB_PROTOBUF_ENCODER)
+  enable_language(CXX)
+  find_package(Protobuf 3.12 REQUIRED)
+  if(NOT TARGET protobuf::libprotoc)
+    message(FATAL_ERROR "FLB_PROTOBUF_ENCODER requires libprotoc development libraries")
+  endif()
+  FLB_DEFINITION(FLB_HAVE_PROTOBUF_ENCODER)
+endif()
+
 # avro-c (Avro Encoding)
 # =====================
 if(FLB_AVRO_ENCODER)
@@ -1360,6 +1425,10 @@ if(FLB_LUAJIT)
     include(cmake/luajit.cmake)
   endif()
   FLB_DEFINITION(FLB_HAVE_LUAJIT)
+  FLB_DEFINITION(FLB_HAVE_LUA)
+elseif(FLB_WASM_LUA)
+  include(cmake/wasm-lua.cmake)
+  FLB_DEFINITION(FLB_HAVE_LUA)
 endif()
 
 # PostgreSQL
@@ -1453,8 +1522,8 @@ if(NOT FLB_POSIX_TLS)
   check_c_source_compiles("
    __thread int a;
    int main() {
-       __tls_get_addr(0);
-       return 0;
+       a = 1;
+       return a - 1;
    }" FLB_HAVE_C_TLS)
   if(FLB_HAVE_C_TLS)
     FLB_DEFINITION(FLB_HAVE_C_TLS)
@@ -1530,6 +1599,14 @@ else()
 endif()
 
 # Instruct CMake to build the Fluent Bit Core
+if(MSVC OR FLB_JEMALLOC)
+  # MSVC tests need plugin-private symbols that are not exported from fluent-bit.dll.
+  # Jemalloc must not be embedded in both the test executable and shared library.
+  set(FLB_TEST_LINK_LIBRARY fluent-bit-static)
+else()
+  set(FLB_TEST_LINK_LIBRARY fluent-bit-shared)
+endif()
+
 add_subdirectory(include)
 add_subdirectory(plugins)
 add_subdirectory(src)
@@ -1551,6 +1628,12 @@ endif()
 if(FLB_TESTS_INTERNAL)
   enable_testing()
   add_subdirectory(tests/internal/)
+endif()
+
+if(FLB_WASM_BROWSER)
+  enable_testing()
+  include(cmake/wasm-sdk.cmake)
+  add_subdirectory(tests/wasm)
 endif()
 
 # Installer Generation (Cpack)
@@ -1608,19 +1691,41 @@ if(DPKG_PROGRAM)
     ${PROJECT_SOURCE_DIR}/cpack/debian/conffiles
     )
 
+  set(LDCONFIG_POSTINST_CMDS "")
   if(FLB_RUN_LDCONFIG)
-    set(LDCONFIG_DIR ${FLB_INSTALL_LIBDIR})
-    file(WRITE ${PROJECT_BINARY_DIR}/scripts/postinst "
+    if(IS_ABSOLUTE "${FLB_INSTALL_LIBDIR}")
+      set(LDCONFIG_DIR "${FLB_INSTALL_LIBDIR}")
+    else()
+      set(LDCONFIG_DIR "/${FLB_INSTALL_LIBDIR}")
+    endif()
+    set(LDCONFIG_POSTINST_CMDS "
 mkdir -p /etc/ld.so.conf.d
 echo \"${LDCONFIG_DIR}\" > /etc/ld.so.conf.d/libfluent-bit.conf
 ldconfig
-    ")
-    file(WRITE ${PROJECT_BINARY_DIR}/scripts/prerm "
+")
+    file(WRITE ${PROJECT_BINARY_DIR}/scripts/prerm "#!/bin/sh
+set -e
 rm -f -- /etc/ld.so.conf.d/libfluent-bit.conf
 ldconfig
-    ")
-    set(CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA "${PROJECT_BINARY_DIR}/scripts/postinst;${PROJECT_BINARY_DIR}/scripts/prerm")
+")
+    execute_process(COMMAND chmod 0755 "${PROJECT_BINARY_DIR}/scripts/prerm"
+      RESULT_VARIABLE FLB_CHMOD_PRERM_RESULT)
+    if(NOT FLB_CHMOD_PRERM_RESULT EQUAL 0)
+      message(FATAL_ERROR "Failed to make ${PROJECT_BINARY_DIR}/scripts/prerm executable")
+    endif()
+    list(APPEND CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA "${PROJECT_BINARY_DIR}/scripts/prerm")
   endif(FLB_RUN_LDCONFIG)
+
+  configure_file(
+    ${PROJECT_SOURCE_DIR}/cpack/debian/postinst.in
+    ${PROJECT_BINARY_DIR}/scripts/postinst
+    @ONLY)
+  execute_process(COMMAND chmod 0755 "${PROJECT_BINARY_DIR}/scripts/postinst"
+    RESULT_VARIABLE FLB_CHMOD_POSTINST_RESULT)
+  if(NOT FLB_CHMOD_POSTINST_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to make ${PROJECT_BINARY_DIR}/scripts/postinst executable")
+  endif()
+  list(APPEND CPACK_DEBIAN_RUNTIME_PACKAGE_CONTROL_EXTRA "${PROJECT_BINARY_DIR}/scripts/postinst")
 
 endif()
 

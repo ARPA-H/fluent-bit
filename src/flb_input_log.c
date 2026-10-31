@@ -166,12 +166,8 @@ static int route_payload_apply_outputs(struct flb_input_instance *ins,
             }
 
             if (route_path->ins->total_limit_size != -1) {
-                if (route_path->ins->fs_chunks_size > chunk_size_sz) {
-                    route_path->ins->fs_chunks_size -= chunk_size_sz;
-                }
-                else {
-                    route_path->ins->fs_chunks_size = 0;
-                }
+                flb_input_chunk_output_size_subtract(route_path->ins,
+                                                     chunk_size_sz);
             }
 
             flb_routes_mask_clear_bit(chunk->routes_mask,
@@ -1059,12 +1055,7 @@ static int input_chunk_apply_base_direct_routes(struct flb_input_instance *ins,
                 continue;
             }
 
-            if (o_ins->fs_chunks_size > chunk_size_sz) {
-                o_ins->fs_chunks_size -= chunk_size_sz;
-            }
-            else {
-                o_ins->fs_chunks_size = 0;
-            }
+            flb_input_chunk_output_size_subtract(o_ins, chunk_size_sz);
         }
 
         chunk->fs_counted = FLB_FALSE;
@@ -1535,13 +1526,20 @@ static int input_log_append_processed_internal(struct flb_input_instance *ins,
     return ret;
 }
 
+/*
+ * 'exact_records' tells whether 'records' is the exact number of log records in
+ * the buffer. Caller-provided hints (for example, lines read by an input) are
+ * not forwarded to processors, which count the records themselves.
+ */
 static int input_log_append(struct flb_input_instance *ins,
                             size_t processor_starting_stage,
-                            size_t records,
+                            size_t records, int exact_records,
                             const char *tag, size_t tag_len,
                             const void *buf, size_t buf_size)
 {
     int ret;
+    int known_records = -1;
+    int processed_records = -1;
     int processor_is_active;
     void *out_buf = (void *) buf;
     size_t out_size = buf_size;
@@ -1559,12 +1557,17 @@ static int input_log_append(struct flb_input_instance *ins,
             }
         }
 
-        ret = flb_processor_run(ins->processor,
-                                processor_starting_stage,
-                                FLB_PROCESSOR_LOGS,
-                                tag, tag_len,
-                                (char *) buf, buf_size,
-                                &out_buf, &out_size);
+        if (exact_records && records <= INT_MAX) {
+            known_records = (int) records;
+        }
+
+        ret = flb_processor_run_with_count(ins->processor,
+                                           processor_starting_stage,
+                                           FLB_PROCESSOR_LOGS,
+                                           tag, tag_len,
+                                           (char *) buf, buf_size,
+                                           &out_buf, &out_size,
+                                           known_records, &processed_records);
         if (ret == -1) {
             return -1;
         }
@@ -1576,9 +1579,13 @@ static int input_log_append(struct flb_input_instance *ins,
             return 0;
         }
 
-        if (buf != out_buf) {
-            /* a new buffer was created, re-count the number of records */
-            records = flb_mp_count_log_records(out_buf, out_size);
+        if (buf != out_buf || exact_records) {
+            if (processed_records >= 0) {
+                records = processed_records;
+            }
+            else if (buf != out_buf) {
+                records = flb_mp_count_log_records(out_buf, out_size);
+            }
         }
     }
 
@@ -1613,7 +1620,7 @@ int flb_input_log_append(struct flb_input_instance *ins,
     size_t records;
 
     records = flb_mp_count_log_records(buf, buf_size);
-    ret = input_log_append(ins, 0, records, tag, tag_len, buf, buf_size);
+    ret = input_log_append(ins, 0, records, FLB_TRUE, tag, tag_len, buf, buf_size);
     return ret;
 }
 
@@ -1645,6 +1652,7 @@ int flb_input_log_append_skip_processor_stages(struct flb_input_instance *ins,
     return input_log_append(ins,
                             processor_starting_stage,
                             flb_mp_count_log_records(buf, buf_size),
+                            FLB_TRUE,
                             tag,
                             tag_len,
                             buf,
@@ -1659,6 +1667,6 @@ int flb_input_log_append_records(struct flb_input_instance *ins,
 {
     int ret;
 
-    ret = input_log_append(ins, 0, records, tag, tag_len, buf, buf_size);
+    ret = input_log_append(ins, 0, records, FLB_FALSE, tag, tag_len, buf, buf_size);
     return ret;
 }
