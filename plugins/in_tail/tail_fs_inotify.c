@@ -387,6 +387,10 @@ static int in_tail_progress_check_callback(struct flb_input_instance *ins,
 
     pending_data_detected = FLB_FALSE;
 
+    if (flb_input_buf_paused(ctx->ins) == FLB_TRUE) {
+        return 0;
+    }
+
     mk_list_foreach_safe(head, tmp, &ctx->files_event) {
         file = mk_list_entry(head, struct flb_tail_file, _head);
         ret = reconcile_file_state(ctx, file, "in_tail_progress_check", &pending);
@@ -433,7 +437,10 @@ int flb_tail_fs_inotify_init(struct flb_input_instance *in,
     }
     ctx->coll_fd_fs1 = ret;
 
-    /* Register callback to check current tail offsets */
+    /*
+     * Keep the collector ID so the recovery timer follows the inotify
+     * collector through input pause and resume transitions.
+     */
     ret = flb_input_set_collector_time(in, in_tail_progress_check_callback,
                                        ctx->progress_check_interval,
                                        ctx->progress_check_interval_nsec,
@@ -450,11 +457,13 @@ int flb_tail_fs_inotify_init(struct flb_input_instance *in,
 void flb_tail_fs_inotify_pause(struct flb_tail_config *ctx)
 {
     flb_input_collector_pause(ctx->coll_fd_fs1, ctx->ins);
+    flb_input_collector_pause(ctx->coll_fd_progress_check, ctx->ins);
 }
 
 void flb_tail_fs_inotify_resume(struct flb_tail_config *ctx)
 {
     flb_input_collector_resume(ctx->coll_fd_fs1, ctx->ins);
+    flb_input_collector_resume(ctx->coll_fd_progress_check, ctx->ins);
 }
 
 int flb_tail_fs_inotify_add(struct flb_tail_file *file)

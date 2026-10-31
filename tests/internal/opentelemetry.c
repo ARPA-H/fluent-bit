@@ -43,6 +43,22 @@
 #include <ctraces/ctr_encode_opentelemetry.h>
 #include <fluent-otel-proto/fluent-otel.h>
 #include <msgpack.h>
+#include <limits.h>
+#include <stddef.h>
+#include <stdio.h>
+#ifdef _WIN32
+#include <io.h>
+#define test_dup(fd)          _dup(fd)
+#define test_dup2(fd, target) _dup2(fd, target)
+#define test_close(fd)        _close(fd)
+#define test_fileno(stream)   _fileno(stream)
+#else
+#include <unistd.h>
+#define test_dup(fd)          dup(fd)
+#define test_dup2(fd, target) dup2(fd, target)
+#define test_close(fd)        close(fd)
+#define test_fileno(stream)   fileno(stream)
+#endif
 #include <string.h>
 #include <fluent-bit/flb_json.h>
 
@@ -1352,6 +1368,15 @@ static void run_metrics_case(msgpack_object *case_obj, const char *case_name)
                     exp_histogram = cfl_list_entry(context->exp_histograms.next,
                                                    struct cmt_exp_histogram, _head);
                     metric = &exp_histogram->map->metric;
+                    /* JSON decoding preserves previous windows; check the latest
+                     * point for cases that supplied several unlabeled observations. */
+                    if (exp_histogram->map->label_count == 0 &&
+                        !cfl_list_is_empty(&exp_histogram->map->metrics)) {
+                        metric = cfl_list_entry(exp_histogram->map->metrics.prev,
+                                               struct cmt_metric, _head);
+                        TEST_CHECK(cmt_metric_get_timestamp(metric) >=
+                                   cmt_metric_get_timestamp(&exp_histogram->map->metric));
+                    }
                     test_check_metric_description_unit(exp_histogram_obj,
                                                        &exp_histogram->opts,
                                                        exp_histogram->map);
@@ -2424,7 +2449,7 @@ void test_opentelemetry_traces_otlp_json_roundtrip()
         "\"spanId\":\"0011223344556677\",\"name\":\"op-a\",\"kind\":2,"
         "\"startTimeUnixNano\":\"1704067200000000000\",\"endTimeUnixNano\":\"1704067201000000000\","
         "\"attributes\":[{\"key\":\"http.method\",\"value\":{\"stringValue\":\"GET\"}}],"
-        "\"status\":{\"code\":\"OK\"}}]}]}]}";
+        "\"status\":{\"code\":1}}]}]}]}";
 
     trace_context = flb_opentelemetry_json_traces_to_ctrace(expected,
                                                             strlen(expected),
@@ -2465,6 +2490,70 @@ void test_opentelemetry_traces_otlp_json_roundtrip()
     ctr_destroy(trace_context);
 }
 
+/* Check complete streams and a truncated second context in both JSON formats. */
+void test_opentelemetry_traces_otlp_json_stream_boundaries(void)
+{
+    int ret;
+    int result;
+    int format;
+    int test_case;
+    char *msgpack_buffer;
+    char *stream;
+    size_t msgpack_size;
+    size_t sizes[3];
+    flb_sds_t actual;
+    struct ctrace *context;
+    const char *input = "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[]}]}]}";
+    flb_sds_t (*converters[2])(const void *, size_t, int *) = {
+        flb_opentelemetry_traces_msgpack_to_otlp_json,
+        flb_opentelemetry_traces_msgpack_to_otlp_json_pretty
+    };
+
+    context = flb_opentelemetry_json_traces_to_ctrace(input, strlen(input), &result);
+    TEST_CHECK(context != NULL);
+    if (context == NULL) {
+        return;
+    }
+
+    ret = ctr_encode_msgpack_create(context, &msgpack_buffer, &msgpack_size);
+    ctr_destroy(context);
+    TEST_CHECK(ret == 0);
+    if (ret != 0) {
+        return;
+    }
+
+    stream = flb_malloc(msgpack_size * 2);
+    TEST_CHECK(stream != NULL);
+    if (stream == NULL) {
+        flb_free(msgpack_buffer);
+        return;
+    }
+    memcpy(stream, msgpack_buffer, msgpack_size);
+    memcpy(stream + msgpack_size, msgpack_buffer, msgpack_size);
+    flb_free(msgpack_buffer);
+
+    sizes[0] = msgpack_size;
+    sizes[1] = msgpack_size * 2;
+    sizes[2] = msgpack_size * 2 - 1;
+
+    for (format = 0; format < 2; format++) {
+        for (test_case = 0; test_case < 3; test_case++) {
+            actual = converters[format](stream, sizes[test_case], &result);
+            if (test_case < 2) {
+                TEST_CHECK(actual != NULL);
+                TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_JSON_SUCCESS);
+            }
+            else {
+                TEST_CHECK(actual == NULL);
+                TEST_CHECK(result == FLB_OPENTELEMETRY_OTLP_JSON_INVALID_ARGUMENT);
+            }
+            flb_sds_destroy(actual);
+        }
+    }
+
+    flb_free(stream);
+}
+
 void test_opentelemetry_logs_otlp_proto_from_plain_logs()
 {
     int ret;
@@ -2474,6 +2563,7 @@ void test_opentelemetry_logs_otlp_proto_from_plain_logs()
     struct flb_log_event_encoder encoder;
     struct flb_opentelemetry_otlp_logs_options options;
     Opentelemetry__Proto__Collector__Logs__V1__ExportLogsServiceRequest *decoded;
+    char empty_binary[] = {(char) 0xc4, 0x00};
 
     timestamp.tm.tv_sec = 1640995200;
     timestamp.tm.tv_nsec = 0;
@@ -2499,7 +2589,10 @@ void test_opentelemetry_logs_otlp_proto_from_plain_logs()
     ret = flb_log_event_encoder_append_body_values(
             &encoder,
             FLB_LOG_EVENT_CSTRING_VALUE("message"),
-            FLB_LOG_EVENT_CSTRING_VALUE("hello from dummy"));
+            FLB_LOG_EVENT_CSTRING_VALUE("hello from dummy"),
+            FLB_LOG_EVENT_CSTRING_VALUE("empty_binary"),
+            FLB_LOG_EVENT_MSGPACK_RAW_VALUE(empty_binary,
+                                            sizeof(empty_binary)));
     TEST_CHECK(ret == FLB_EVENT_ENCODER_SUCCESS);
     if (ret != FLB_EVENT_ENCODER_SUCCESS) {
         flb_log_event_encoder_destroy(&encoder);
@@ -2514,6 +2607,7 @@ void test_opentelemetry_logs_otlp_proto_from_plain_logs()
 
     memset(&options, 0, sizeof(options));
     options.logs_require_otel_metadata = FLB_FALSE;
+    options.logs_body_key_attributes = FLB_TRUE;
 
     actual = flb_opentelemetry_logs_to_otlp_proto(encoder.output_buffer,
                                                   encoder.output_length,
@@ -2539,6 +2633,15 @@ void test_opentelemetry_logs_otlp_proto_from_plain_logs()
                    OPENTELEMETRY__PROTO__COMMON__V1__ANY_VALUE__VALUE_STRING_VALUE);
         TEST_CHECK(strcmp(decoded->resource_logs[0]->scope_logs[0]->log_records[0]->body->string_value,
                           "hello from dummy") == 0);
+        TEST_CHECK(decoded->resource_logs[0]->scope_logs[0]->log_records[0]->n_attributes == 1);
+        TEST_CHECK(strcmp(decoded->resource_logs[0]->scope_logs[0]->log_records[0]
+                              ->attributes[0]->key,
+                          "empty_binary") == 0);
+        TEST_CHECK(decoded->resource_logs[0]->scope_logs[0]->log_records[0]
+                       ->attributes[0]->value->value_case ==
+                   OPENTELEMETRY__PROTO__COMMON__V1__ANY_VALUE__VALUE_BYTES_VALUE);
+        TEST_CHECK(decoded->resource_logs[0]->scope_logs[0]->log_records[0]
+                       ->attributes[0]->value->bytes_value.len == 0);
         opentelemetry__proto__collector__logs__v1__export_logs_service_request__free_unpacked(decoded,
                                                                                                NULL);
     }
@@ -2692,6 +2795,667 @@ void test_opentelemetry_metrics_msgpack_otlp_proto_merges_contexts()
     destroy_metrics_context_list(&contexts);
 }
 
+void test_opentelemetry_metrics_otlp_proto_data_point_batches()
+{
+    int index;
+    int result;
+    int ret;
+    int seen[11];
+    size_t batch_index;
+    size_t resource_index;
+    size_t scope_index;
+    size_t metric_index;
+    size_t point_index;
+    size_t total_data_points;
+    uint64_t timestamp;
+    char *label_keys[] = {"series"};
+    char *label_values[1];
+    char *series[] = {
+        "series-0", "series-1", "series-2", "series-3", "series-4", "series-5",
+        "series-6", "series-7", "series-8", "series-9", "series-10"
+    };
+    struct cmt *context;
+    struct cmt_gauge *gauge;
+    struct cmt_opentelemetry_batches *batches;
+    Opentelemetry__Proto__Metrics__V1__Metric *metric;
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics *scope;
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics *resource;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *point;
+    Opentelemetry__Proto__Collector__Metrics__V1__ExportMetricsServiceRequest *decoded;
+
+    memset(seen, 0, sizeof(seen));
+    context = cmt_create();
+    TEST_CHECK(context != NULL);
+    if (context == NULL) {
+        return;
+    }
+
+    gauge = cmt_gauge_create(context,
+                             "test",
+                             "batch",
+                             "value",
+                             "batching test",
+                             1,
+                             label_keys);
+    TEST_CHECK(gauge != NULL);
+    if (gauge == NULL) {
+        cmt_destroy(context);
+        return;
+    }
+
+    for (index = 0; index < 11; index++) {
+        label_values[0] = series[index];
+        ret = cmt_gauge_set(gauge,
+                            (uint64_t) index + 1,
+                            (double) index,
+                            1,
+                            label_values);
+        TEST_CHECK(ret == 0);
+    }
+
+    batches = cmt_encode_opentelemetry_create_batches(context, 4, &result);
+    TEST_CHECK(result == CMT_ENCODE_OPENTELEMETRY_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches == NULL) {
+        cmt_destroy(context);
+        return;
+    }
+
+    TEST_CHECK(batches->count == 3);
+    TEST_CHECK(batches->entries[0].data_point_count == 4);
+    TEST_CHECK(batches->entries[1].data_point_count == 4);
+    TEST_CHECK(batches->entries[2].data_point_count == 3);
+
+    total_data_points = 0;
+    for (batch_index = 0; batch_index < batches->count; batch_index++) {
+        decoded =
+            opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__unpack(
+                NULL,
+                cfl_sds_len(batches->entries[batch_index].payload),
+                (uint8_t *) batches->entries[batch_index].payload);
+        TEST_CHECK(decoded != NULL);
+        if (decoded == NULL) {
+            continue;
+        }
+
+        for (resource_index = 0;
+             resource_index < decoded->n_resource_metrics;
+             resource_index++) {
+            resource = decoded->resource_metrics[resource_index];
+            for (scope_index = 0; scope_index < resource->n_scope_metrics; scope_index++) {
+                scope = resource->scope_metrics[scope_index];
+                for (metric_index = 0; metric_index < scope->n_metrics; metric_index++) {
+                    metric = scope->metrics[metric_index];
+                    TEST_CHECK(metric->data_case ==
+                               OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE);
+                    if (metric->data_case !=
+                        OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE) {
+                        continue;
+                    }
+
+                    for (point_index = 0;
+                         point_index < metric->gauge->n_data_points;
+                         point_index++) {
+                        point = metric->gauge->data_points[point_index];
+                        timestamp = point->time_unix_nano;
+                        TEST_CHECK(timestamp >= 1 && timestamp <= 11);
+                        if (timestamp >= 1 && timestamp <= 11) {
+                            seen[timestamp - 1]++;
+                        }
+                        total_data_points++;
+                    }
+                }
+            }
+        }
+
+        opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__free_unpacked(
+            decoded,
+            NULL);
+    }
+
+    TEST_CHECK(total_data_points == 11);
+    for (index = 0; index < 11; index++) {
+        TEST_CHECK(seen[index] == 1);
+    }
+
+    cmt_encode_opentelemetry_destroy_batches(batches);
+
+    batches = cmt_encode_opentelemetry_create_batches(context, 11, &result);
+    TEST_CHECK(result == CMT_ENCODE_OPENTELEMETRY_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches != NULL) {
+        TEST_CHECK(batches->count == 1);
+        TEST_CHECK(batches->entries[0].data_point_count == 11);
+        cmt_encode_opentelemetry_destroy_batches(batches);
+    }
+
+    batches = cmt_encode_opentelemetry_create_batches(context, 0, &result);
+    TEST_CHECK(result == CMT_ENCODE_OPENTELEMETRY_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches != NULL) {
+        TEST_CHECK(batches->count == 1);
+        TEST_CHECK(batches->entries[0].data_point_count == 11);
+        cmt_encode_opentelemetry_destroy_batches(batches);
+    }
+
+    cmt_destroy(context);
+
+    batches = cmt_encode_opentelemetry_split_payload("invalid", 7, 4, &result);
+    TEST_CHECK(batches == NULL);
+    TEST_CHECK(result == CMT_ENCODE_OPENTELEMETRY_INVALID_ARGUMENT_ERROR);
+}
+
+void test_opentelemetry_metrics_otlp_proto_batches_all_metric_types()
+{
+    int result;
+    int gauge_seen;
+    int sum_seen;
+    int histogram_seen;
+    int exp_histogram_seen;
+    int summary_seen;
+    int gauge_points_seen[3] = {0};
+    int sum_points_seen[3] = {0};
+    int histogram_points_seen[3] = {0};
+    int exp_histogram_points_seen[3] = {0};
+    int summary_points_seen[3] = {0};
+    size_t payload_size;
+    size_t batch_index;
+    size_t resource_index;
+    size_t scope_index;
+    size_t metric_index;
+    size_t point_index;
+    size_t data_point_index;
+    size_t total_data_points;
+    flb_sds_t payload;
+    Opentelemetry__Proto__Metrics__V1__Metric *metric;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *number_point;
+    Opentelemetry__Proto__Metrics__V1__HistogramDataPoint *histogram_point;
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogramDataPoint
+        *exp_histogram_point;
+    Opentelemetry__Proto__Metrics__V1__SummaryDataPoint *summary_point;
+    Opentelemetry__Proto__Metrics__V1__Metric metrics[5];
+    Opentelemetry__Proto__Metrics__V1__Metric *metric_entries[5];
+    Opentelemetry__Proto__Metrics__V1__Gauge gauge;
+    Opentelemetry__Proto__Metrics__V1__Sum sum;
+    Opentelemetry__Proto__Metrics__V1__Histogram histogram;
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogram exp_histogram;
+    Opentelemetry__Proto__Metrics__V1__Summary summary;
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint gauge_point_values[3];
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint sum_point_values[3];
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *gauge_points[3];
+    Opentelemetry__Proto__Metrics__V1__NumberDataPoint *sum_points[3];
+    Opentelemetry__Proto__Metrics__V1__HistogramDataPoint histogram_point_values[3];
+    Opentelemetry__Proto__Metrics__V1__HistogramDataPoint *histogram_points[3];
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogramDataPoint
+        exp_histogram_point_values[3];
+    Opentelemetry__Proto__Metrics__V1__ExponentialHistogramDataPoint
+        *exp_histogram_points[3];
+    Opentelemetry__Proto__Metrics__V1__SummaryDataPoint summary_point_values[3];
+    Opentelemetry__Proto__Metrics__V1__SummaryDataPoint *summary_points[3];
+    Opentelemetry__Proto__Resource__V1__Resource resource_metadata;
+    Opentelemetry__Proto__Common__V1__InstrumentationScope scope_metadata;
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics scope;
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics *scopes[1];
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics resource;
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics *resources[1];
+    Opentelemetry__Proto__Metrics__V1__ScopeMetrics *decoded_scope;
+    Opentelemetry__Proto__Metrics__V1__ResourceMetrics *decoded_resource;
+    Opentelemetry__Proto__Collector__Metrics__V1__ExportMetricsServiceRequest request;
+    Opentelemetry__Proto__Collector__Metrics__V1__ExportMetricsServiceRequest *decoded;
+    struct cmt_opentelemetry_batches *batches;
+
+    opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__init(
+        &request);
+    opentelemetry__proto__metrics__v1__resource_metrics__init(&resource);
+    opentelemetry__proto__metrics__v1__scope_metrics__init(&scope);
+    opentelemetry__proto__metrics__v1__gauge__init(&gauge);
+    opentelemetry__proto__metrics__v1__sum__init(&sum);
+    opentelemetry__proto__metrics__v1__histogram__init(&histogram);
+    opentelemetry__proto__metrics__v1__exponential_histogram__init(&exp_histogram);
+    opentelemetry__proto__metrics__v1__summary__init(&summary);
+    opentelemetry__proto__resource__v1__resource__init(&resource_metadata);
+    opentelemetry__proto__common__v1__instrumentation_scope__init(&scope_metadata);
+
+    for (metric_index = 0; metric_index < 5; metric_index++) {
+        opentelemetry__proto__metrics__v1__metric__init(&metrics[metric_index]);
+        metric_entries[metric_index] = &metrics[metric_index];
+    }
+
+    for (point_index = 0; point_index < 3; point_index++) {
+        opentelemetry__proto__metrics__v1__number_data_point__init(
+            &gauge_point_values[point_index]);
+        opentelemetry__proto__metrics__v1__number_data_point__init(
+            &sum_point_values[point_index]);
+        opentelemetry__proto__metrics__v1__histogram_data_point__init(
+            &histogram_point_values[point_index]);
+        opentelemetry__proto__metrics__v1__exponential_histogram_data_point__init(
+            &exp_histogram_point_values[point_index]);
+        opentelemetry__proto__metrics__v1__summary_data_point__init(
+            &summary_point_values[point_index]);
+
+        gauge_points[point_index] = &gauge_point_values[point_index];
+        gauge_point_values[point_index].start_time_unix_nano = 100 + point_index;
+        gauge_point_values[point_index].time_unix_nano = 1000 + point_index;
+        gauge_point_values[point_index].flags = 1 + point_index;
+        gauge_point_values[point_index].value_case =
+            OPENTELEMETRY__PROTO__METRICS__V1__NUMBER_DATA_POINT__VALUE_AS_INT;
+        gauge_point_values[point_index].as_int = 10 + point_index;
+
+        sum_points[point_index] = &sum_point_values[point_index];
+        sum_point_values[point_index].start_time_unix_nano = 200 + point_index;
+        sum_point_values[point_index].time_unix_nano = 2000 + point_index;
+        sum_point_values[point_index].flags = 11 + point_index;
+        sum_point_values[point_index].value_case =
+            OPENTELEMETRY__PROTO__METRICS__V1__NUMBER_DATA_POINT__VALUE_AS_DOUBLE;
+        sum_point_values[point_index].as_double = 20.5 + point_index;
+
+        histogram_points[point_index] = &histogram_point_values[point_index];
+        histogram_point_values[point_index].start_time_unix_nano = 300 + point_index;
+        histogram_point_values[point_index].time_unix_nano = 3000 + point_index;
+        histogram_point_values[point_index].count = 30 + point_index;
+        histogram_point_values[point_index].has_sum = FLB_TRUE;
+        histogram_point_values[point_index].sum = 30.5 + point_index;
+        histogram_point_values[point_index].flags = 21 + point_index;
+        histogram_point_values[point_index].has_min = FLB_TRUE;
+        histogram_point_values[point_index].min = 3.5 + point_index;
+        histogram_point_values[point_index].has_max = FLB_TRUE;
+        histogram_point_values[point_index].max = 35.5 + point_index;
+
+        exp_histogram_points[point_index] = &exp_histogram_point_values[point_index];
+        exp_histogram_point_values[point_index].start_time_unix_nano = 400 + point_index;
+        exp_histogram_point_values[point_index].time_unix_nano = 4000 + point_index;
+        exp_histogram_point_values[point_index].count = 40 + point_index;
+        exp_histogram_point_values[point_index].has_sum = FLB_TRUE;
+        exp_histogram_point_values[point_index].sum = 40.5 + point_index;
+        exp_histogram_point_values[point_index].scale = 4 + point_index;
+        exp_histogram_point_values[point_index].zero_count = 40 + point_index;
+        exp_histogram_point_values[point_index].flags = 31 + point_index;
+        exp_histogram_point_values[point_index].has_min = FLB_TRUE;
+        exp_histogram_point_values[point_index].min = 4.5 + point_index;
+        exp_histogram_point_values[point_index].has_max = FLB_TRUE;
+        exp_histogram_point_values[point_index].max = 45.5 + point_index;
+        exp_histogram_point_values[point_index].zero_threshold = 0.5 + point_index;
+
+        summary_points[point_index] = &summary_point_values[point_index];
+        summary_point_values[point_index].start_time_unix_nano = 500 + point_index;
+        summary_point_values[point_index].time_unix_nano = 5000 + point_index;
+        summary_point_values[point_index].count = 50 + point_index;
+        summary_point_values[point_index].sum = 50.5 + point_index;
+        summary_point_values[point_index].flags = 41 + point_index;
+    }
+
+    gauge.n_data_points = 3;
+    gauge.data_points = gauge_points;
+    metrics[0].name = "gauge";
+    metrics[0].description = "gauge description";
+    metrics[0].unit = "gauge unit";
+    metrics[0].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE;
+    metrics[0].gauge = &gauge;
+
+    sum.n_data_points = 3;
+    sum.data_points = sum_points;
+    sum.aggregation_temporality =
+        OPENTELEMETRY__PROTO__METRICS__V1__AGGREGATION_TEMPORALITY__AGGREGATION_TEMPORALITY_DELTA;
+    sum.is_monotonic = FLB_TRUE;
+    metrics[1].name = "sum";
+    metrics[1].description = "sum description";
+    metrics[1].unit = "sum unit";
+    metrics[1].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUM;
+    metrics[1].sum = &sum;
+
+    histogram.n_data_points = 3;
+    histogram.data_points = histogram_points;
+    histogram.aggregation_temporality =
+        OPENTELEMETRY__PROTO__METRICS__V1__AGGREGATION_TEMPORALITY__AGGREGATION_TEMPORALITY_CUMULATIVE;
+    metrics[2].name = "histogram";
+    metrics[2].description = "histogram description";
+    metrics[2].unit = "histogram unit";
+    metrics[2].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_HISTOGRAM;
+    metrics[2].histogram = &histogram;
+
+    exp_histogram.n_data_points = 3;
+    exp_histogram.data_points = exp_histogram_points;
+    exp_histogram.aggregation_temporality =
+        OPENTELEMETRY__PROTO__METRICS__V1__AGGREGATION_TEMPORALITY__AGGREGATION_TEMPORALITY_DELTA;
+    metrics[3].name = "exponential_histogram";
+    metrics[3].description = "exponential histogram description";
+    metrics[3].unit = "exponential histogram unit";
+    metrics[3].data_case =
+        OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_EXPONENTIAL_HISTOGRAM;
+    metrics[3].exponential_histogram = &exp_histogram;
+
+    summary.n_data_points = 3;
+    summary.data_points = summary_points;
+    metrics[4].name = "summary";
+    metrics[4].description = "summary description";
+    metrics[4].unit = "summary unit";
+    metrics[4].data_case = OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUMMARY;
+    metrics[4].summary = &summary;
+
+    scope_metadata.name = "splitter scope";
+    scope_metadata.version = "2.0.0";
+    scope_metadata.dropped_attributes_count = 9;
+    scope.scope = &scope_metadata;
+    scope.schema_url = "https://example.com/scope/2.0.0";
+    scope.n_metrics = 5;
+    scope.metrics = metric_entries;
+    scopes[0] = &scope;
+    resource_metadata.dropped_attributes_count = 7;
+    resource.resource = &resource_metadata;
+    resource.schema_url = "https://example.com/resource/1.0.0";
+    resource.n_scope_metrics = 1;
+    resource.scope_metrics = scopes;
+    resources[0] = &resource;
+    request.n_resource_metrics = 1;
+    request.resource_metrics = resources;
+
+    payload_size =
+        opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__get_packed_size(
+            &request);
+    payload = flb_sds_create_size(payload_size);
+    TEST_CHECK(payload != NULL);
+    if (payload == NULL) {
+        return;
+    }
+
+    opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__pack(
+        &request,
+        (uint8_t *) payload);
+    flb_sds_len_set(payload, payload_size);
+
+    batches = cmt_encode_opentelemetry_split_payload(payload,
+                                                     payload_size,
+                                                     2,
+                                                     &result);
+    flb_sds_destroy(payload);
+    TEST_CHECK(result == CMT_ENCODE_OPENTELEMETRY_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches == NULL) {
+        return;
+    }
+
+    TEST_CHECK(batches->count == 8);
+    for (batch_index = 0; batch_index < batches->count; batch_index++) {
+        if (batch_index < 7) {
+            TEST_CHECK(batches->entries[batch_index].data_point_count == 2);
+        }
+        else {
+            TEST_CHECK(batches->entries[batch_index].data_point_count == 1);
+        }
+    }
+
+    gauge_seen = 0;
+    sum_seen = 0;
+    histogram_seen = 0;
+    exp_histogram_seen = 0;
+    summary_seen = 0;
+    total_data_points = 0;
+
+    for (batch_index = 0; batch_index < batches->count; batch_index++) {
+        decoded =
+            opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__unpack(
+                NULL,
+                cfl_sds_len(batches->entries[batch_index].payload),
+                (uint8_t *) batches->entries[batch_index].payload);
+        TEST_CHECK(decoded != NULL);
+        if (decoded == NULL) {
+            continue;
+        }
+
+        TEST_CHECK(decoded->n_resource_metrics == 1);
+        for (resource_index = 0;
+             resource_index < decoded->n_resource_metrics;
+             resource_index++) {
+            decoded_resource = decoded->resource_metrics[resource_index];
+            TEST_CHECK(decoded_resource->resource != NULL);
+            TEST_CHECK(strcmp(decoded_resource->schema_url,
+                              "https://example.com/resource/1.0.0") == 0);
+            if (decoded_resource->resource != NULL) {
+                TEST_CHECK(decoded_resource->resource->dropped_attributes_count == 7);
+            }
+            TEST_CHECK(decoded_resource->n_scope_metrics == 1);
+
+            for (scope_index = 0;
+                 scope_index < decoded_resource->n_scope_metrics;
+                 scope_index++) {
+                decoded_scope = decoded_resource->scope_metrics[scope_index];
+                TEST_CHECK(decoded_scope->scope != NULL);
+                TEST_CHECK(strcmp(decoded_scope->schema_url,
+                                  "https://example.com/scope/2.0.0") == 0);
+                if (decoded_scope->scope != NULL) {
+                    TEST_CHECK(strcmp(decoded_scope->scope->name, "splitter scope") == 0);
+                    TEST_CHECK(strcmp(decoded_scope->scope->version, "2.0.0") == 0);
+                    TEST_CHECK(decoded_scope->scope->dropped_attributes_count == 9);
+                }
+
+                for (metric_index = 0;
+                     metric_index < decoded_scope->n_metrics;
+                     metric_index++) {
+                    metric = decoded_scope->metrics[metric_index];
+                    if (metric->data_case ==
+                        OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_GAUGE) {
+                        gauge_seen++;
+                        TEST_CHECK(strcmp(metric->name, "gauge") == 0);
+                        TEST_CHECK(strcmp(metric->description, "gauge description") == 0);
+                        TEST_CHECK(strcmp(metric->unit, "gauge unit") == 0);
+                        TEST_CHECK(metric->gauge->n_data_points > 0);
+                        TEST_CHECK(metric->gauge->n_data_points <= 2);
+                        total_data_points += metric->gauge->n_data_points;
+
+                        for (point_index = 0;
+                             point_index < metric->gauge->n_data_points;
+                             point_index++) {
+                            number_point = metric->gauge->data_points[point_index];
+                            TEST_CHECK(number_point->time_unix_nano >= 1000);
+                            TEST_CHECK(number_point->time_unix_nano < 1003);
+                            if (number_point->time_unix_nano < 1000 ||
+                                number_point->time_unix_nano >= 1003) {
+                                continue;
+                            }
+                            data_point_index = number_point->time_unix_nano - 1000;
+                            gauge_points_seen[data_point_index]++;
+                            TEST_CHECK(number_point->start_time_unix_nano ==
+                                       100 + data_point_index);
+                            TEST_CHECK(number_point->flags == 1 + data_point_index);
+                            TEST_CHECK(number_point->value_case ==
+                                OPENTELEMETRY__PROTO__METRICS__V1__NUMBER_DATA_POINT__VALUE_AS_INT);
+                            TEST_CHECK(number_point->as_int == 10 + data_point_index);
+                        }
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUM) {
+                        sum_seen++;
+                        TEST_CHECK(strcmp(metric->name, "sum") == 0);
+                        TEST_CHECK(strcmp(metric->description, "sum description") == 0);
+                        TEST_CHECK(strcmp(metric->unit, "sum unit") == 0);
+                        TEST_CHECK(metric->sum->aggregation_temporality ==
+                                   sum.aggregation_temporality);
+                        TEST_CHECK(metric->sum->is_monotonic == sum.is_monotonic);
+                        TEST_CHECK(metric->sum->n_data_points > 0);
+                        TEST_CHECK(metric->sum->n_data_points <= 2);
+                        total_data_points += metric->sum->n_data_points;
+
+                        for (point_index = 0;
+                             point_index < metric->sum->n_data_points;
+                             point_index++) {
+                            number_point = metric->sum->data_points[point_index];
+                            TEST_CHECK(number_point->time_unix_nano >= 2000);
+                            TEST_CHECK(number_point->time_unix_nano < 2003);
+                            if (number_point->time_unix_nano < 2000 ||
+                                number_point->time_unix_nano >= 2003) {
+                                continue;
+                            }
+                            data_point_index = number_point->time_unix_nano - 2000;
+                            sum_points_seen[data_point_index]++;
+                            TEST_CHECK(number_point->start_time_unix_nano ==
+                                       200 + data_point_index);
+                            TEST_CHECK(number_point->flags == 11 + data_point_index);
+                            TEST_CHECK(number_point->value_case ==
+                                OPENTELEMETRY__PROTO__METRICS__V1__NUMBER_DATA_POINT__VALUE_AS_DOUBLE);
+                            TEST_CHECK(number_point->as_double == 20.5 + data_point_index);
+                        }
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_HISTOGRAM) {
+                        histogram_seen++;
+                        TEST_CHECK(strcmp(metric->name, "histogram") == 0);
+                        TEST_CHECK(strcmp(metric->description, "histogram description") == 0);
+                        TEST_CHECK(strcmp(metric->unit, "histogram unit") == 0);
+                        TEST_CHECK(metric->histogram->aggregation_temporality ==
+                                   histogram.aggregation_temporality);
+                        TEST_CHECK(metric->histogram->n_data_points > 0);
+                        TEST_CHECK(metric->histogram->n_data_points <= 2);
+                        total_data_points += metric->histogram->n_data_points;
+
+                        for (point_index = 0;
+                             point_index < metric->histogram->n_data_points;
+                             point_index++) {
+                            histogram_point = metric->histogram->data_points[point_index];
+                            TEST_CHECK(histogram_point->time_unix_nano >= 3000);
+                            TEST_CHECK(histogram_point->time_unix_nano < 3003);
+                            if (histogram_point->time_unix_nano < 3000 ||
+                                histogram_point->time_unix_nano >= 3003) {
+                                continue;
+                            }
+                            data_point_index = histogram_point->time_unix_nano - 3000;
+                            histogram_points_seen[data_point_index]++;
+                            TEST_CHECK(histogram_point->start_time_unix_nano ==
+                                       300 + data_point_index);
+                            TEST_CHECK(histogram_point->count == 30 + data_point_index);
+                            TEST_CHECK(histogram_point->has_sum == FLB_TRUE);
+                            TEST_CHECK(histogram_point->sum == 30.5 + data_point_index);
+                            TEST_CHECK(histogram_point->flags == 21 + data_point_index);
+                            TEST_CHECK(histogram_point->has_min == FLB_TRUE);
+                            TEST_CHECK(histogram_point->min == 3.5 + data_point_index);
+                            TEST_CHECK(histogram_point->has_max == FLB_TRUE);
+                            TEST_CHECK(histogram_point->max == 35.5 + data_point_index);
+                        }
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_EXPONENTIAL_HISTOGRAM) {
+                        exp_histogram_seen++;
+                        TEST_CHECK(strcmp(metric->name, "exponential_histogram") == 0);
+                        TEST_CHECK(strcmp(metric->description,
+                                          "exponential histogram description") == 0);
+                        TEST_CHECK(strcmp(metric->unit,
+                                          "exponential histogram unit") == 0);
+                        TEST_CHECK(metric->exponential_histogram->aggregation_temporality ==
+                                   exp_histogram.aggregation_temporality);
+                        TEST_CHECK(metric->exponential_histogram->n_data_points > 0);
+                        TEST_CHECK(metric->exponential_histogram->n_data_points <= 2);
+                        total_data_points += metric->exponential_histogram->n_data_points;
+
+                        for (point_index = 0;
+                             point_index < metric->exponential_histogram->n_data_points;
+                             point_index++) {
+                            exp_histogram_point =
+                                metric->exponential_histogram->data_points[point_index];
+                            TEST_CHECK(exp_histogram_point->time_unix_nano >= 4000);
+                            TEST_CHECK(exp_histogram_point->time_unix_nano < 4003);
+                            if (exp_histogram_point->time_unix_nano < 4000 ||
+                                exp_histogram_point->time_unix_nano >= 4003) {
+                                continue;
+                            }
+                            data_point_index = exp_histogram_point->time_unix_nano - 4000;
+                            exp_histogram_points_seen[data_point_index]++;
+                            TEST_CHECK(exp_histogram_point->start_time_unix_nano ==
+                                       400 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->count == 40 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->has_sum == FLB_TRUE);
+                            TEST_CHECK(exp_histogram_point->sum == 40.5 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->scale == 4 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->zero_count ==
+                                       40 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->flags == 31 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->has_min == FLB_TRUE);
+                            TEST_CHECK(exp_histogram_point->min == 4.5 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->has_max == FLB_TRUE);
+                            TEST_CHECK(exp_histogram_point->max == 45.5 + data_point_index);
+                            TEST_CHECK(exp_histogram_point->zero_threshold ==
+                                       0.5 + data_point_index);
+                        }
+                    }
+                    else if (metric->data_case ==
+                             OPENTELEMETRY__PROTO__METRICS__V1__METRIC__DATA_SUMMARY) {
+                        summary_seen++;
+                        TEST_CHECK(strcmp(metric->name, "summary") == 0);
+                        TEST_CHECK(strcmp(metric->description, "summary description") == 0);
+                        TEST_CHECK(strcmp(metric->unit, "summary unit") == 0);
+                        TEST_CHECK(metric->summary->n_data_points > 0);
+                        TEST_CHECK(metric->summary->n_data_points <= 2);
+                        total_data_points += metric->summary->n_data_points;
+
+                        for (point_index = 0;
+                             point_index < metric->summary->n_data_points;
+                             point_index++) {
+                            summary_point = metric->summary->data_points[point_index];
+                            TEST_CHECK(summary_point->time_unix_nano >= 5000);
+                            TEST_CHECK(summary_point->time_unix_nano < 5003);
+                            if (summary_point->time_unix_nano < 5000 ||
+                                summary_point->time_unix_nano >= 5003) {
+                                continue;
+                            }
+                            data_point_index = summary_point->time_unix_nano - 5000;
+                            summary_points_seen[data_point_index]++;
+                            TEST_CHECK(summary_point->start_time_unix_nano ==
+                                       500 + data_point_index);
+                            TEST_CHECK(summary_point->count == 50 + data_point_index);
+                            TEST_CHECK(summary_point->sum == 50.5 + data_point_index);
+                            TEST_CHECK(summary_point->flags == 41 + data_point_index);
+                        }
+                    }
+                }
+            }
+        }
+
+        opentelemetry__proto__collector__metrics__v1__export_metrics_service_request__free_unpacked(
+            decoded,
+            NULL);
+    }
+
+    TEST_CHECK(total_data_points == 15);
+    TEST_CHECK(gauge_seen == 2);
+    TEST_CHECK(sum_seen == 2);
+    TEST_CHECK(histogram_seen == 2);
+    TEST_CHECK(exp_histogram_seen == 2);
+    TEST_CHECK(summary_seen == 2);
+    for (point_index = 0; point_index < 3; point_index++) {
+        TEST_CHECK(gauge_points_seen[point_index] == 1);
+        TEST_CHECK(sum_points_seen[point_index] == 1);
+        TEST_CHECK(histogram_points_seen[point_index] == 1);
+        TEST_CHECK(exp_histogram_points_seen[point_index] == 1);
+        TEST_CHECK(summary_points_seen[point_index] == 1);
+    }
+
+    cmt_encode_opentelemetry_destroy_batches(batches);
+}
+
+void test_opentelemetry_metrics_otlp_proto_batches_empty_context()
+{
+    int result;
+    struct cmt *context;
+    struct cmt_opentelemetry_batches *batches;
+
+    context = cmt_create();
+    TEST_CHECK(context != NULL);
+    if (context == NULL) {
+        return;
+    }
+
+    batches = cmt_encode_opentelemetry_create_batches(context, 4, &result);
+    TEST_CHECK(result == CMT_ENCODE_OPENTELEMETRY_SUCCESS);
+    TEST_CHECK(batches != NULL);
+    if (batches != NULL) {
+        TEST_CHECK(batches->count <= 1);
+        if (batches->count == 1) {
+            TEST_CHECK(batches->entries[0].data_point_count == 0);
+        }
+        cmt_encode_opentelemetry_destroy_batches(batches);
+    }
+
+    cmt_destroy(context);
+}
+
 void test_opentelemetry_traces_otlp_proto_roundtrip()
 {
     int result;
@@ -2735,8 +3499,564 @@ void test_opentelemetry_traces_otlp_proto_roundtrip()
     ctr_destroy(trace_context);
 }
 
+/* Declaration of the cutoff helper from the out_opentelemetry plugin */
+extern void otel_metrics_apply_cutoff(struct cmt *cmt, int threshold_seconds);
+
+/*
+ * Test the metric age cut-off feature in the out_opentelemetry plugin.
+ * Calls the plugin's own flb_otel_metric_expire() — the same function
+ * used by process_metrics() — and verifies that:
+ *   1. Stale data points are dropped with a normal threshold.
+ *   2. The underflow guard (threshold_ns > now → no expire) prevents
+ *      data loss when the threshold would exceed current Unix time.
+ */
+void test_opentelemetry_metrics_cutoff()
+{
+    struct cmt       *cmt;
+    struct cmt_gauge *g;
+    uint64_t          now;
+
+    cmt_initialize();
+
+    /* --- normal cutoff: 200-second-old sample expires, 1-second-old survives --- */
+    cmt = cmt_create();
+    TEST_CHECK(cmt != NULL);
+
+    g = cmt_gauge_create(cmt, "test", "otel", "cutoff", "cutoff test", 1,
+                         (char *[]) {"host"});
+    TEST_CHECK(g != NULL);
+
+    now = cfl_time_now();
+    cmt_gauge_set(g, now - 1000000000ULL,   1.0, 1, (char *[]) {"fresh"});
+    cmt_gauge_set(g, now - 200000000000ULL, 2.0, 1, (char *[]) {"stale"});
+
+    TEST_CHECK(cfl_list_size(&g->map->metrics) == 2);
+
+    /* plugin function: cutoff_threshold = 100 s → stale sample dropped */
+    otel_metrics_apply_cutoff(cmt, 100);
+
+    TEST_CHECK(cfl_list_size(&g->map->metrics) == 1);
+    cmt_destroy(cmt);
+
+    /* --- underflow guard: INT_MAX seconds in ns > current Unix time → nothing dropped --- */
+    cmt = cmt_create();
+    TEST_CHECK(cmt != NULL);
+
+    g = cmt_gauge_create(cmt, "test", "otel", "cutoff2", "cutoff boundary", 1,
+                         (char *[]) {"host"});
+    TEST_CHECK(g != NULL);
+
+    now = cfl_time_now();
+    cmt_gauge_set(g, now - 1000000000ULL, 1.0, 1, (char *[]) {"a"});
+
+    /* plugin function clamps expiration to 0 → cmt_expire never called */
+    otel_metrics_apply_cutoff(cmt, INT_MAX);
+
+    TEST_CHECK(cfl_list_size(&g->map->metrics) == 1);
+    cmt_destroy(cmt);
+}
+
+static void *test_find_metric_family(struct cfl_list *families, size_t head_offset,
+                                     size_t opts_offset, const char *name)
+{
+    struct cfl_list *head;
+    struct cmt_opts *opts;
+    char            *family;
+
+    cfl_list_foreach(head, families) {
+        family = ((char *) head) - head_offset;
+        opts = (struct cmt_opts *) (family + opts_offset);
+        if (opts->fqname != NULL && strcmp(opts->fqname, name) == 0) {
+            return family;
+        }
+    }
+
+    return NULL;
+}
+
+#define TEST_FIND_FAMILY(list, type, name) \
+    ((type *) test_find_metric_family(list, offsetof(type, _head), offsetof(type, opts), name))
+
+static struct cmt_metric *test_single_dynamic_sample(struct cmt_map *map)
+{
+    if (map == NULL || map->metric_static_set || cfl_list_size(&map->metrics) != 1) {
+        return NULL;
+    }
+
+    return cfl_list_entry_first(&map->metrics, struct cmt_metric, _head);
+}
+
+static size_t test_kvlist_key_count(struct cfl_kvlist *list, const char *key)
+{
+    size_t             count;
+    struct cfl_list   *head;
+    struct cfl_kvpair *pair;
+
+    count = 0;
+    cfl_list_foreach(head, &list->list) {
+        pair = cfl_list_entry(head, struct cfl_kvpair, _head);
+        if (strcmp(pair->key, key) == 0) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+/* the typed OTLP metadata of a merged sample must describe the last point */
+static void test_check_last_point_metadata(struct cmt_metric *sample, uint64_t start_time)
+{
+    struct cfl_variant *value;
+
+    TEST_CHECK(sample->otlp_metadata != NULL);
+    if (sample->otlp_metadata == NULL) {
+        return;
+    }
+
+    TEST_CHECK(test_kvlist_key_count(sample->otlp_metadata, "attributes") == 1);
+    TEST_CHECK(test_kvlist_key_count(sample->otlp_metadata, "start_time_unix_nano") == 1);
+
+    value = cfl_kvlist_fetch(sample->otlp_metadata, "start_time_unix_nano");
+    TEST_CHECK(value != NULL &&
+               (value->type == CFL_VARIANT_UINT || value->type == CFL_VARIANT_INT));
+    if (value != NULL && value->type == CFL_VARIANT_UINT) {
+        TEST_CHECK(value->data.as_uint64 == start_time);
+    }
+}
+
+/* Repeated series inside one OTLP JSON request update one sample, last wins. */
+void test_opentelemetry_metrics_json_merges_repeated_series()
+{
+    int                       ret;
+    int                       result;
+    char                     *payload;
+    char                     *msgpack_buffer;
+    size_t                    msgpack_size;
+    flb_sds_t                 otlp_json;
+    struct cfl_list           contexts;
+    struct cmt               *context;
+    struct cmt_gauge         *gauge;
+    struct cmt_counter       *counter;
+    struct cmt_histogram     *histogram;
+    struct cmt_summary       *summary;
+    struct cmt_exp_histogram *exp_histogram;
+    struct cmt_metric        *sample;
+
+    payload =
+        "{\"resourceMetrics\":[{\"resource\":{},\"scopeMetrics\":[{\"scope\":{\"name\":\"s\"},"
+        "\"metrics\":["
+        "{\"name\":\"g\",\"gauge\":{\"dataPoints\":["
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"1\",\"timeUnixNano\":\"1700000001000000000\",\"asDouble\":1.0},"
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"2\",\"timeUnixNano\":\"1700000002000000000\",\"asDouble\":2.0}"
+        "]}},"
+        "{\"name\":\"u\",\"gauge\":{\"dataPoints\":["
+        "{\"startTimeUnixNano\":\"1\",\"timeUnixNano\":\"1700000001000000000\",\"asDouble\":1.0},"
+        "{\"startTimeUnixNano\":\"2\",\"timeUnixNano\":\"1700000002000000000\",\"asDouble\":2.0}"
+        "]}},"
+        "{\"name\":\"c\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,"
+        "\"dataPoints\":["
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"1\",\"timeUnixNano\":\"1700000001000000000\",\"asInt\":\"10\"},"
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"2\",\"timeUnixNano\":\"1700000002000000000\",\"asInt\":\"20\"}"
+        "]}},"
+        "{\"name\":\"h\",\"histogram\":{\"aggregationTemporality\":2,\"dataPoints\":["
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"1\",\"timeUnixNano\":\"1700000001000000000\","
+        "\"count\":\"3\",\"sum\":3.0,\"bucketCounts\":[\"1\",\"2\"],\"explicitBounds\":[1.0]},"
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"2\",\"timeUnixNano\":\"1700000002000000000\","
+        "\"count\":\"7\",\"sum\":9.0,\"bucketCounts\":[\"3\",\"4\"],\"explicitBounds\":[1.0]}"
+        "]}},"
+        "{\"name\":\"sm\",\"summary\":{\"dataPoints\":["
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"1\",\"timeUnixNano\":\"1700000001000000000\","
+        "\"count\":\"2\",\"sum\":4.0,"
+        "\"quantileValues\":[{\"quantile\":0.5,\"value\":1.0}]},"
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"2\",\"timeUnixNano\":\"1700000002000000000\","
+        "\"count\":\"5\",\"sum\":8.0,"
+        "\"quantileValues\":[{\"quantile\":0.5,\"value\":6.0}]}"
+        "]}},"
+        "{\"name\":\"e\",\"exponentialHistogram\":{\"aggregationTemporality\":2,"
+        "\"dataPoints\":["
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"1\",\"timeUnixNano\":\"1700000001000000000\","
+        "\"count\":\"1\",\"sum\":1.0,\"scale\":0,\"zeroCount\":\"0\","
+        "\"positive\":{\"offset\":0,\"bucketCounts\":[\"1\"]}},"
+        "{\"attributes\":[{\"key\":\"host\",\"value\":{\"stringValue\":\"h1\"}}],"
+        "\"startTimeUnixNano\":\"2\",\"timeUnixNano\":\"1700000002000000000\","
+        "\"count\":\"4\",\"sum\":6.0,\"scale\":0,\"zeroCount\":\"1\","
+        "\"positive\":{\"offset\":1,\"bucketCounts\":[\"1\",\"2\"]}}"
+        "]}}"
+        "]}]}]}";
+
+    cfl_list_init(&contexts);
+
+    ret = flb_opentelemetry_metrics_json_to_cmt(&contexts, payload, strlen(payload));
+    TEST_CHECK(ret == 0);
+    TEST_CHECK(cfl_list_size(&contexts) == 1);
+    if (ret != 0 || cfl_list_size(&contexts) != 1) {
+        destroy_metrics_context_list(&contexts);
+        return;
+    }
+
+    context = cfl_list_entry_first(&contexts, struct cmt, _head);
+
+    /* gauge with labels */
+    gauge = TEST_FIND_FAMILY(&context->gauges, struct cmt_gauge, "g");
+    TEST_CHECK(gauge != NULL);
+    sample = gauge != NULL ? test_single_dynamic_sample(gauge->map) : NULL;
+    TEST_CHECK(sample != NULL);
+    if (sample != NULL) {
+        TEST_CHECK(cmt_metric_get_value(sample) == 2.0);
+        test_check_last_point_metadata(sample, 2);
+    }
+
+    /* gauge without labels: both points land on the static sample */
+    gauge = TEST_FIND_FAMILY(&context->gauges, struct cmt_gauge, "u");
+    TEST_CHECK(gauge != NULL);
+    if (gauge != NULL) {
+        TEST_CHECK(gauge->map->metric_static_set == CMT_TRUE);
+        TEST_CHECK(cfl_list_size(&gauge->map->metrics) == 0);
+        TEST_CHECK(cmt_metric_get_value(&gauge->map->metric) == 2.0);
+        test_check_last_point_metadata(&gauge->map->metric, 2);
+    }
+
+    /* sum */
+    counter = TEST_FIND_FAMILY(&context->counters, struct cmt_counter, "c");
+    TEST_CHECK(counter != NULL);
+    sample = counter != NULL ? test_single_dynamic_sample(counter->map) : NULL;
+    TEST_CHECK(sample != NULL);
+    if (sample != NULL) {
+        TEST_CHECK(cmt_metric_get_value(sample) == 20.0);
+        test_check_last_point_metadata(sample, 2);
+    }
+
+    /* histogram */
+    histogram = TEST_FIND_FAMILY(&context->histograms, struct cmt_histogram, "h");
+    TEST_CHECK(histogram != NULL);
+    sample = histogram != NULL ? test_single_dynamic_sample(histogram->map) : NULL;
+    TEST_CHECK(sample != NULL);
+    if (sample != NULL) {
+        TEST_CHECK(cmt_metric_hist_get_count_value(sample) == 7);
+        TEST_CHECK(cmt_metric_hist_get_sum_value(sample) == 9.0);
+        TEST_CHECK(cmt_metric_hist_get_bucket_count(sample, 0) == 3);
+        TEST_CHECK(cmt_metric_hist_get_bucket_count(sample, 1) == 4);
+        test_check_last_point_metadata(sample, 2);
+    }
+
+    /* summary */
+    summary = TEST_FIND_FAMILY(&context->summaries, struct cmt_summary, "sm");
+    TEST_CHECK(summary != NULL);
+    sample = summary != NULL ? test_single_dynamic_sample(summary->map) : NULL;
+    TEST_CHECK(sample != NULL);
+    if (sample != NULL) {
+        TEST_CHECK(cmt_summary_get_count_value(sample) == 5);
+        TEST_CHECK(cmt_summary_get_sum_value(sample) == 8.0);
+        TEST_CHECK(cmt_summary_quantile_get_value(sample, 0) == 6.0);
+        test_check_last_point_metadata(sample, 2);
+    }
+
+    /* exponential histogram */
+    exp_histogram = TEST_FIND_FAMILY(&context->exp_histograms, struct cmt_exp_histogram, "e");
+    TEST_CHECK(exp_histogram != NULL);
+    sample = exp_histogram != NULL ? test_single_dynamic_sample(exp_histogram->map) : NULL;
+    TEST_CHECK(sample != NULL);
+    if (sample != NULL) {
+        TEST_CHECK(sample->exp_hist_count == 4);
+        TEST_CHECK(sample->exp_hist_zero_count == 1);
+        TEST_CHECK(sample->exp_hist_positive_offset == 1);
+        TEST_CHECK(sample->exp_hist_positive_count == 2);
+        if (sample->exp_hist_positive_count == 2) {
+            TEST_CHECK(sample->exp_hist_positive_buckets[1] == 2);
+        }
+        test_check_last_point_metadata(sample, 2);
+    }
+
+    /* the re-encoded payload carries a single data point per series */
+    ret = cmt_encode_msgpack_create(context, &msgpack_buffer, &msgpack_size);
+    TEST_CHECK(ret == 0);
+    if (ret == 0) {
+        otlp_json = flb_opentelemetry_metrics_msgpack_to_otlp_json(msgpack_buffer,
+                                                                   msgpack_size,
+                                                                   &result);
+        TEST_CHECK(otlp_json != NULL);
+        if (otlp_json != NULL) {
+            TEST_CHECK(strstr(otlp_json, "\"asInt\":\"20\"") != NULL);
+            TEST_CHECK(strstr(otlp_json, "\"asInt\":\"10\"") == NULL);
+            TEST_CHECK(strstr(otlp_json, "\"startTimeUnixNano\":\"1\"") == NULL);
+            flb_sds_destroy(otlp_json);
+        }
+        flb_free(msgpack_buffer);
+    }
+
+    destroy_metrics_context_list(&contexts);
+}
+
+static size_t test_count_substring(const char *haystack, const char *needle)
+{
+    size_t      count;
+    const char *cursor;
+
+    count = 0;
+    cursor = haystack;
+    while ((cursor = strstr(cursor, needle)) != NULL) {
+        count++;
+        cursor += strlen(needle);
+    }
+
+    return count;
+}
+
+/* A list with many invalid attributes is reported once, healthy ones are kept. */
+void test_json_invalid_attributes_warn_once()
+{
+    int                ret;
+    int                type;
+    int                saved_stderr;
+    int                index;
+    char              *buffer;
+    char               log_buffer[4096];
+    size_t             size;
+    size_t             offset;
+    size_t             log_size;
+    FILE              *capture;
+    flb_sds_t          json;
+    msgpack_unpacked   unpacked;
+    struct cfl_kvlist *attributes;
+
+    json = flb_sds_create("[");
+    TEST_ASSERT(json != NULL);
+    for (index = 0; index < 50; index++) {
+        flb_sds_printf(&json, "{\"key\":\"b%d\",\"value\":{\"bytesValue\":\"!!!\"}},", index);
+    }
+    flb_sds_cat_safe(&json, "{\"key\":\"ok\",\"value\":{\"stringValue\":\"kept\"}}]",
+                     sizeof("{\"key\":\"ok\",\"value\":{\"stringValue\":\"kept\"}}]") - 1);
+
+    ret = flb_pack_json(json, flb_sds_len(json), &buffer, &size, &type, NULL);
+    TEST_ASSERT(ret == 0);
+
+    offset = 0;
+    msgpack_unpacked_init(&unpacked);
+    TEST_ASSERT(msgpack_unpack_next(&unpacked, buffer, size, &offset));
+
+    attributes = cfl_kvlist_create();
+    TEST_ASSERT(attributes != NULL);
+
+    capture = tmpfile();
+    TEST_ASSERT(capture != NULL);
+
+    fflush(stderr);
+    saved_stderr = test_dup(test_fileno(stderr));
+    TEST_ASSERT(saved_stderr >= 0);
+    test_dup2(test_fileno(capture), test_fileno(stderr));
+
+    ret = flb_otel_utils_clone_kvlist_from_otlp_json_array(attributes, &unpacked.data);
+
+    fflush(stderr);
+    test_dup2(saved_stderr, test_fileno(stderr));
+    test_close(saved_stderr);
+
+    TEST_CHECK(ret == 0);
+    TEST_CHECK(cfl_kvlist_count(attributes) == 1);
+    TEST_CHECK(cfl_kvlist_fetch(attributes, "ok") != NULL);
+
+    rewind(capture);
+    log_size = fread(log_buffer, 1, sizeof(log_buffer) - 1, capture);
+    log_buffer[log_size] = '\0';
+    fclose(capture);
+
+    TEST_CHECK(test_count_substring(log_buffer, "invalid OTLP JSON attribute") == 1);
+    TEST_CHECK(strstr(log_buffer, "ignoring 50 invalid") != NULL);
+    TEST_MSG("captured log: %s", log_buffer);
+
+    cfl_kvlist_destroy(attributes);
+    msgpack_unpacked_destroy(&unpacked);
+    flb_free(buffer);
+    flb_sds_destroy(json);
+}
+
+static int test_logs_json_to_otlp_json(char *payload, flb_sds_t *out)
+{
+    int                                       ret;
+    int                                       result;
+    struct flb_log_event_encoder              encoder;
+    struct flb_opentelemetry_otlp_logs_options options;
+
+    *out = NULL;
+
+    ret = flb_log_event_encoder_init(&encoder, FLB_LOG_EVENT_FORMAT_DEFAULT);
+    if (ret != FLB_EVENT_ENCODER_SUCCESS) {
+        return -1;
+    }
+
+    result = 0;
+    ret = flb_opentelemetry_logs_json_to_msgpack(&encoder, payload, strlen(payload),
+                                                 "log", &result);
+    if (ret != 0 || result != 0) {
+        flb_log_event_encoder_destroy(&encoder);
+        return -1;
+    }
+
+    memset(&options, 0, sizeof(options));
+    options.logs_require_otel_metadata = FLB_TRUE;
+    options.logs_body_key = "log";
+
+    *out = flb_opentelemetry_logs_to_otlp_json(encoder.output_buffer, encoder.output_length,
+                                               &options, &result);
+    flb_log_event_encoder_destroy(&encoder);
+
+    return *out != NULL ? 0 : -1;
+}
+
+/* OTLP JSON bytesValue is base64 decoded and round trips as bytesValue. */
+void test_opentelemetry_logs_json_bytes_value()
+{
+    int        ret;
+    char      *payload;
+    flb_sds_t  actual;
+
+    payload =
+        "{\"resourceLogs\":[{\"resource\":{\"attributes\":[{\"key\":\"rb\","
+        "\"value\":{\"bytesValue\":\"AAE=\"}}]},\"scopeLogs\":[{\"scope\":{\"name\":\"s\"},"
+        "\"logRecords\":[{\"timeUnixNano\":\"1700000001000000000\","
+        "\"body\":{\"bytesValue\":\"aGVsbG8=\"},"
+        "\"attributes\":[{\"key\":\"padded\",\"value\":{\"bytesValue\":\"AAH/\"}},"
+        "{\"key\":\"unpadded\",\"value\":{\"bytesValue\":\"aGVsbG8\"}},"
+        "{\"key\":\"urlsafe\",\"value\":{\"bytesValue\":\"-_8\"}},"
+        "{\"key\":\"empty\",\"value\":{\"bytesValue\":\"\"}}]}]}]}]}";
+
+    ret = test_logs_json_to_otlp_json(payload, &actual);
+    TEST_CHECK(ret == 0);
+    if (ret == 0) {
+        TEST_CHECK(strstr(actual, "\"body\":{\"bytesValue\":\"aGVsbG8=\"}") != NULL);
+        TEST_CHECK(strstr(actual, "{\"key\":\"rb\",\"value\":{\"bytesValue\":\"AAE=\"}}") != NULL);
+        TEST_CHECK(strstr(actual,
+                          "{\"key\":\"padded\",\"value\":{\"bytesValue\":\"AAH/\"}}") != NULL);
+        TEST_CHECK(strstr(actual, "{\"key\":\"unpadded\","
+                          "\"value\":{\"bytesValue\":\"aGVsbG8=\"}}") != NULL);
+        TEST_CHECK(strstr(actual,
+                          "{\"key\":\"urlsafe\",\"value\":{\"bytesValue\":\"+/8=\"}}") != NULL);
+        TEST_CHECK(strstr(actual, "stringValue") == NULL);
+        TEST_MSG("actual: %s", actual);
+        flb_sds_destroy(actual);
+    }
+
+    /* invalid base64 is rejected like other invalid values */
+    payload =
+        "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":[{"
+        "\"timeUnixNano\":\"1700000001000000000\",\"body\":{\"bytesValue\":\"!!!\"}}]}]}]}";
+    ret = test_logs_json_to_otlp_json(payload, &actual);
+    TEST_CHECK(ret != 0);
+    if (actual != NULL) {
+        flb_sds_destroy(actual);
+    }
+
+    payload =
+        "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":[{"
+        "\"timeUnixNano\":\"1700000001000000000\",\"body\":{\"stringValue\":\"x\"},"
+        "\"attributes\":[{\"key\":\"b\",\"value\":{\"bytesValue\":\"A\"}}]}]}]}]}";
+    ret = test_logs_json_to_otlp_json(payload, &actual);
+    TEST_CHECK(ret != 0);
+    if (actual != NULL) {
+        flb_sds_destroy(actual);
+    }
+}
+
 /* Test list */
+static void test_opentelemetry_logs_generated_limit(void)
+{
+    struct flb_log_event_encoder encoder;
+    const char *payload = "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":[{},{}]}]}]}";
+    const char *empty = "{\"resourceLogs\":[{\"resource\":{\"attributes\":["
+                        "{\"key\":\"k\",\"value\":{\"stringValue\":\"v\"}}]},"
+                        "\"scopeLogs\":[{},{\"logRecords\":[]}]}]}";
+    size_t length;
+    int ret;
+
+    TEST_CHECK(flb_log_event_encoder_init(&encoder, FLB_LOG_EVENT_FORMAT_FLUENT_BIT_V2) == 0);
+    TEST_CHECK(flb_opentelemetry_logs_json_to_msgpack(&encoder, payload, strlen(payload),
+                                                     NULL, NULL) == 0);
+    length = encoder.output_length;
+    TEST_CHECK(length > 0);
+    flb_log_event_encoder_reset(&encoder);
+    encoder.output_limit = length;
+    TEST_CHECK(flb_opentelemetry_logs_json_to_msgpack(&encoder, payload, strlen(payload),
+                                                     NULL, NULL) == 0);
+    TEST_CHECK(encoder.output_length == length);
+
+    /* Existing caller output counts against the budget and survives rejection. */
+    ret = flb_opentelemetry_logs_json_to_msgpack(&encoder, payload, strlen(payload), NULL, NULL);
+    TEST_CHECK(ret < 0);
+    TEST_CHECK(encoder.output_length == length);
+    flb_log_event_encoder_reset(&encoder);
+    encoder.output_limit = length - 1;
+    TEST_CHECK(flb_opentelemetry_logs_json_to_msgpack(&encoder, payload, strlen(payload),
+                                                     NULL, NULL) < 0);
+    TEST_CHECK(encoder.output_length == 0);
+    /* Empty scopes must succeed without serializing even a temporary group header. */
+    encoder.output_limit = 0;
+    TEST_CHECK(flb_opentelemetry_logs_json_to_msgpack(&encoder, empty, strlen(empty),
+                                                     NULL, NULL) == 0);
+    TEST_CHECK(encoder.output_length == 0);
+    flb_log_event_encoder_destroy(&encoder);
+}
+
+static void test_json_anyvalue_signed_bytes_and_invalid_attributes(void)
+{
+    const char *json = "[{\"key\":\"negative\",\"value\":{\"intValue\":\"-9223372036854775808\"}},"
+                       "{\"key\":\"positive\",\"value\":{\"intValue\":\"9223372036854775807\"}},"
+                       "{\"key\":\"bytes\",\"value\":{\"bytesValue\":\"AAH/\"}},"
+                       "{\"key\":\"overflow\",\"value\":{\"intValue\":\"18446744073709551615\"}},"
+                       "{\"key\":\"invalid\",\"value\":{\"boolValue\":\"wrong\"}},"
+                       "{\"key\":\"healthy\",\"value\":{\"stringValue\":\"kept\"}}]";
+    char *buffer;
+    size_t size;
+    size_t offset = 0;
+    int type;
+    msgpack_unpacked unpacked;
+    struct cfl_kvlist *attributes;
+    struct cfl_variant *value;
+    const unsigned char bytes[] = {0, 1, 255};
+
+    TEST_ASSERT(flb_pack_json(json, strlen(json), &buffer, &size, &type, NULL) == 0);
+    msgpack_unpacked_init(&unpacked);
+    TEST_ASSERT(msgpack_unpack_next(&unpacked, buffer, size, &offset));
+    attributes = cfl_kvlist_create();
+    TEST_ASSERT(attributes != NULL);
+    TEST_CHECK(flb_otel_utils_clone_kvlist_from_otlp_json_array(attributes, &unpacked.data) == 0);
+    value = cfl_kvlist_fetch(attributes, "negative");
+    TEST_CHECK(value != NULL && value->type == CFL_VARIANT_INT);
+    if (value != NULL && value->type == CFL_VARIANT_INT) {
+        TEST_CHECK(value->data.as_int64 == INT64_MIN);
+    }
+    value = cfl_kvlist_fetch(attributes, "positive");
+    TEST_CHECK(value != NULL && value->type == CFL_VARIANT_INT);
+    if (value != NULL && value->type == CFL_VARIANT_INT) {
+        TEST_CHECK(value->data.as_int64 == INT64_MAX);
+    }
+    value = cfl_kvlist_fetch(attributes, "bytes");
+    TEST_CHECK(value != NULL && value->type == CFL_VARIANT_BYTES);
+    if (value != NULL && value->type == CFL_VARIANT_BYTES) {
+        TEST_CHECK(cfl_sds_len(value->data.as_bytes) == sizeof(bytes));
+        TEST_CHECK(memcmp(value->data.as_bytes, bytes, sizeof(bytes)) == 0);
+    }
+    TEST_CHECK(cfl_kvlist_fetch(attributes, "overflow") == NULL);
+    TEST_CHECK(cfl_kvlist_fetch(attributes, "invalid") == NULL);
+    value = cfl_kvlist_fetch(attributes, "healthy");
+    TEST_CHECK(value != NULL && value->type == CFL_VARIANT_STRING);
+    TEST_CHECK(cfl_kvlist_count(attributes) == 4);
+    cfl_kvlist_destroy(attributes);
+    msgpack_unpacked_destroy(&unpacked);
+    flb_free(buffer);
+}
+
 TEST_LIST = {
+    { "opentelemetry_logs_generated_limit", test_opentelemetry_logs_generated_limit },
+    {"json_anyvalue_signed_bytes_invalid_attributes", test_json_anyvalue_signed_bytes_and_invalid_attributes},
     { "hex_to_id", test_hex_to_id },
     { "hex_to_id_error_cases", test_hex_to_id_error_cases },
     { "convert_string_number_to_u64", test_convert_string_number_to_u64 },
@@ -2754,6 +4074,8 @@ TEST_LIST = {
     { "opentelemetry_logs_otlp_proto_from_plain_logs",
       test_opentelemetry_logs_otlp_proto_from_plain_logs },
     { "opentelemetry_traces_cases", test_opentelemetry_traces_cases },
+    { "opentelemetry_traces_otlp_json_stream_boundaries",
+      test_opentelemetry_traces_otlp_json_stream_boundaries },
     { "opentelemetry_traces_otlp_json_roundtrip",
       test_opentelemetry_traces_otlp_json_roundtrip },
     { "opentelemetry_traces_otlp_proto_roundtrip",
@@ -2766,5 +4088,17 @@ TEST_LIST = {
       test_opentelemetry_metrics_otlp_proto_roundtrip },
     { "opentelemetry_metrics_msgpack_otlp_proto_merges_contexts",
       test_opentelemetry_metrics_msgpack_otlp_proto_merges_contexts },
+    { "opentelemetry_metrics_otlp_proto_data_point_batches",
+      test_opentelemetry_metrics_otlp_proto_data_point_batches },
+    { "opentelemetry_metrics_otlp_proto_batches_all_metric_types",
+      test_opentelemetry_metrics_otlp_proto_batches_all_metric_types },
+    { "opentelemetry_metrics_otlp_proto_batches_empty_context",
+      test_opentelemetry_metrics_otlp_proto_batches_empty_context },
+    { "opentelemetry_metrics_cutoff",
+      test_opentelemetry_metrics_cutoff },
+    { "opentelemetry_metrics_json_merges_repeated_series",
+      test_opentelemetry_metrics_json_merges_repeated_series },
+    { "json_invalid_attributes_warn_once", test_json_invalid_attributes_warn_once },
+    { "opentelemetry_logs_json_bytes_value", test_opentelemetry_logs_json_bytes_value },
     { 0 }
 };

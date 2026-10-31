@@ -23,7 +23,10 @@
 #include <fluent-bit/flb_hash_table.h>
 
 #include <monkey/mk_core.h>
+#include <monkey/mk_http_protocol.h>
+#ifdef FLB_HAVE_HTTP_SERVER
 #include <monkey/mk_http.h>
+#endif
 
 #include <cfl/cfl_list.h>
 #include <cfl/cfl_sds.h>
@@ -74,6 +77,7 @@
 #define HTTP_STREAM_STATUS_PROCESSING          7
 #define HTTP_STREAM_STATUS_CLOSED              8
 #define HTTP_STREAM_STATUS_ERROR               9
+#define HTTP_STREAM_STATUS_RELEASED            10
 
 #define HTTP_WWW_AUTHORIZATION_SCHEME_NONE       0
 #define HTTP_WWW_AUTHORIZATION_SCHEME_BASIC      (((uint64_t) 1) << 0)
@@ -94,6 +98,7 @@ struct flb_http_request {
     cfl_sds_t                         host;
     uint16_t                          port;
     cfl_sds_t                         query_string;
+    int                              invalid_header;
     struct flb_hash_table            *headers;
     struct flb_hash_table           *trailer_headers;
     cfl_sds_t                         user_agent;
@@ -130,6 +135,9 @@ struct flb_http_stream {
     int                             role;
     int                             status;
 
+    size_t                          incoming_header_size;
+    size_t                          incoming_header_count;
+
     struct flb_http_request         request;
     struct flb_http_response        response;
 
@@ -144,6 +152,9 @@ struct flb_aws_provider;
 struct flb_connection;
 
 /* HTTP REQUEST */
+
+int flb_http_header_validate(const char *name, size_t name_length,
+                             const char *value, size_t value_length);
 
 int flb_http_request_init(struct flb_http_request *request);
 
